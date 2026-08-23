@@ -1,63 +1,69 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
-<meta name="theme-color" content="#0A0C0E" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<title>Iron Desk — Gym Log</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0A0C0E" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="IronDesk" />
+  <title>Iron Desk — Gym Log</title>
 
-<link rel="manifest" href='data:application/manifest+json,{"name":"Iron Desk","short_name":"IronDesk","start_url":".","display":"standalone","background_color":"%230A0C0E","theme_color":"%230A0C0E","icons":[{"src":"data:image/svg%2Bxml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 192 192%27%3E%3Crect width=%27192%27 height=%27192%27 rx=%2742%27 fill=%27%230A0C0E%27/%3E%3Crect x=%2734%27 y=%2786%27 width=%27124%27 height=%2720%27 rx=%2710%27 fill=%27%23FFB020%27/%3E%3Crect x=%2720%27 y=%2766%27 width=%2726%27 height=%2760%27 rx=%2710%27 fill=%27%23FFB020%27/%3E%3Crect x=%27146%27 y=%2766%27 width=%2726%27 height=%2760%27 rx=%2710%27 fill=%27%23FFB020%27/%3E%3C/svg%3E","sizes":"192x192","type":"image/svg+xml"}]}' />
+  <!-- Embedded SVG Favicon & iOS App Icon -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='100' fill='%230A0C0E'/><path fill='%23FFB020' d='M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z'/></svg>" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='100' fill='%230A0C0E'/><path fill='%23FFB020' d='M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z'/></svg>" />
 
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <!-- Validated Inline Web App Manifest -->
+  <link rel="manifest" href='data:application/manifest+json,{"name":"Iron Desk Logger","short_name":"IronDesk","start_url":".","display":"standalone","background_color":"#0A0C0E","theme_color":"#0A0C0E","icons":[{"src":"data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\"><rect width=\"512\" height=\"512\" rx=\"100\" fill=\"%230A0C0E\"/><path fill=\"%23FFB020\" d=\"M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z\"/></svg>","sizes":"512x512","type":"image/svg+xml","purpose":"any maskable"}]}' />
 
-<script>
-  tailwind.config = {
-    theme: {
-      extend: {
-        colors: {
-          ink:    '#0A0C0E',
-          panel:  '#14181C',
-          raise:  '#1B2127',
-          line:   '#2A333B',
-          txt:    '#EDF2F6',
-          muted:  '#8A98A6',
-          amber:  '#FFB020',
-          ok:     '#35D07F',
-          bad:    '#FF5A5A'
+  <!-- External Libraries -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink:    '#0A0C0E',
+            panel:  '#14181C',
+            raise:  '#1B2127',
+            line:   '#2A333B',
+            txt:    '#EDF2F6',
+            muted:  '#8A98A6',
+            amber:  '#FFB020',
+            ok:     '#35D07F',
+            bad:    '#FF5A5A'
+          }
         }
       }
     }
-  }
-</script>
+  </script>
 
-<style>
-  html, body, #root { height: 100%; background: #0A0C0E; }
-  body {
-    margin: 0;
-    color: #EDF2F6;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    -webkit-tap-highlight-color: transparent;
-    overscroll-behavior-y: none;
-  }
-  /* Numbers are the content of this app. Lock them to a tabular grid so they
-     stop jittering between reps. */
-  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: -0.02em; }
-  input, select, textarea { font-size: 16px; }  /* stops iOS zoom-on-focus */
-  input[type=number]::-webkit-inner-spin-button,
-  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-  ::-webkit-scrollbar { width: 0; height: 0; }
-  .safe-b { padding-bottom: env(safe-area-inset-bottom, 0px); }
-  .safe-t { padding-top: env(safe-area-inset-top, 0px); }
-  :focus-visible { outline: 2px solid #FFB020; outline-offset: 2px; }
-  @keyframes pulseRing { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
-  .ring-live { animation: pulseRing 1.6s ease-in-out infinite; }
-  @media (prefers-reduced-motion: reduce) { .ring-live { animation: none; opacity: .7 } }
-</style>
+  <style>
+    html, body, #root { height: 100%; background: #0A0C0E; }
+    body {
+      margin: 0;
+      color: #EDF2F6;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior-y: none;
+    }
+    .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: -0.02em; }
+    input, select, textarea { font-size: 16px; }  /* stops iOS zoom-on-focus */
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    ::-webkit-scrollbar { width: 0; height: 0; }
+    .safe-b { padding-bottom: env(safe-area-inset-bottom, 0px); }
+    .safe-t { padding-top: env(safe-area-inset-top, 0px); }
+    :focus-visible { outline: 2px solid #FFB020; outline-offset: 2px; }
+    @keyframes pulseRing { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+    .ring-live { animation: pulseRing 1.6s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) { .ring-live { animation: none; opacity: .7 } }
+  </style>
 </head>
 <body>
 <div id="root"></div>
