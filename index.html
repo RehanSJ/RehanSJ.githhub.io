@@ -1,0 +1,1624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#0A0C0E" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>Iron Desk — Gym Log</title>
+
+<link rel="manifest" href='data:application/manifest+json,{"name":"Iron Desk","short_name":"IronDesk","start_url":".","display":"standalone","background_color":"%230A0C0E","theme_color":"%230A0C0E","icons":[{"src":"data:image/svg%2Bxml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 192 192%27%3E%3Crect width=%27192%27 height=%27192%27 rx=%2742%27 fill=%27%230A0C0E%27/%3E%3Crect x=%2734%27 y=%2786%27 width=%27124%27 height=%2720%27 rx=%2710%27 fill=%27%23FFB020%27/%3E%3Crect x=%2720%27 y=%2766%27 width=%2726%27 height=%2760%27 rx=%2710%27 fill=%27%23FFB020%27/%3E%3Crect x=%27146%27 y=%2766%27 width=%2726%27 height=%2760%27 rx=%2710%27 fill=%27%23FFB020%27/%3E%3C/svg%3E","sizes":"192x192","type":"image/svg+xml"}]}' />
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink:    '#0A0C0E',
+          panel:  '#14181C',
+          raise:  '#1B2127',
+          line:   '#2A333B',
+          txt:    '#EDF2F6',
+          muted:  '#8A98A6',
+          amber:  '#FFB020',
+          ok:     '#35D07F',
+          bad:    '#FF5A5A'
+        }
+      }
+    }
+  }
+</script>
+
+<style>
+  html, body, #root { height: 100%; background: #0A0C0E; }
+  body {
+    margin: 0;
+    color: #EDF2F6;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+  /* Numbers are the content of this app. Lock them to a tabular grid so they
+     stop jittering between reps. */
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: -0.02em; }
+  input, select, textarea { font-size: 16px; }  /* stops iOS zoom-on-focus */
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  ::-webkit-scrollbar { width: 0; height: 0; }
+  .safe-b { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .safe-t { padding-top: env(safe-area-inset-top, 0px); }
+  :focus-visible { outline: 2px solid #FFB020; outline-offset: 2px; }
+  @keyframes pulseRing { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+  .ring-live { animation: pulseRing 1.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .ring-live { animation: none; opacity: .7 } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ────────────────────────────────────────────────────────────────
+   Storage — works in three environments, in order of preference:
+   1. Claude artifact sandbox (window.storage)
+   2. A real browser / installed PWA (localStorage)
+   3. Anything else (in-memory, lost on reload)
+   ──────────────────────────────────────────────────────────────── */
+const KEY = 'irondesk:v1';
+const mem = {};
+const hasWS = typeof window !== 'undefined' && window.storage && typeof window.storage.get === 'function';
+const hasLS = (() => {
+  try { localStorage.setItem('__t', '1'); localStorage.removeItem('__t'); return true; }
+  catch (e) { return false; }
+})();
+
+const store = {
+  async load() {
+    if (hasWS) {
+      try { const r = await window.storage.get(KEY); return r ? JSON.parse(r.value) : null; }
+      catch (e) { return null; }
+    }
+    if (hasLS) {
+      try { const v = localStorage.getItem(KEY); return v ? JSON.parse(v) : null; }
+      catch (e) { return null; }
+    }
+    return mem[KEY] || null;
+  },
+  async save(data) {
+    const s = JSON.stringify(data);
+    if (hasWS) { try { await window.storage.set(KEY, s); return; } catch (e) {} }
+    if (hasLS) { try { localStorage.setItem(KEY, s); return; } catch (e) {} }
+    mem[KEY] = data;
+  }
+};
+const storageLabel = hasWS ? 'Sandbox storage' : hasLS ? 'Saved on this device' : 'Not saved — this session only';
+
+/* ── Helpers ─────────────────────────────────────────────────── */
+const uid = () => Math.random().toString(36).slice(2, 10);
+const today = () => new Date().toISOString().slice(0, 10);
+const num = v => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const mmss = s => `${Math.floor(Math.max(0, s) / 60)}:${String(Math.floor(Math.max(0, s)) % 60).padStart(2, '0')}`;
+const dur = s => (s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`);
+
+/* Single source of truth for "is this exercise already in the list?".
+   Everything that can create an exercise — the library screen, the add
+   sheet, and a routine pasted from Claude — routes through here, so a
+   name can only ever exist once regardless of casing or stray spaces. */
+const normalize = name => String(name || '').trim().toLowerCase();
+const findExercise = (list, name) => list.find(ex => normalize(ex.name) === normalize(name));
+
+function addExerciseTo(list, name, opts = {}) {
+  const clean = String(name || '').trim();
+  if (!clean) return { list, added: false, exercise: null };
+  const existing = findExercise(list, clean);
+  if (existing) return { list, added: false, exercise: existing };
+  const exercise = {
+    id: uid(),
+    name: clean,
+    type: opts.type === 'time' ? 'time' : 'reps',
+    defaultRestSec: opts.defaultRestSec != null ? Number(opts.defaultRestSec) : null,
+    isFavorite: !!opts.isFavorite,
+    custom: opts.custom !== false
+  };
+  return { list: [...list, exercise], added: true, exercise };
+}
+
+/* Some embedded contexts block confirm() and prompt(). Degrade gracefully:
+   a tapped destructive button still works, a tapped input just no-ops. */
+function sure(message) {
+  try { return window.confirm(message); } catch (e) { return true; }
+}
+function ask(message, fallback) {
+  try { return window.prompt(message, fallback || ''); } catch (e) { return fallback || null; }
+}
+
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } finally { document.body.removeChild(ta); }
+  return Promise.resolve();
+}
+
+/* ── Audio: a short two-tone chime, built on the fly ──────────── */
+let ac = null;
+function unlockAudio() {
+  try {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') ac.resume();
+  } catch (e) {}
+}
+function beep(times = 3) {
+  try {
+    unlockAudio();
+    if (!ac) return;
+    for (let i = 0; i < times; i++) {
+      const o = ac.createOscillator();
+      const g = ac.createGain();
+      const t = ac.currentTime + i * 0.22;
+      o.type = 'sine';
+      o.frequency.setValueAtTime(i === times - 1 ? 1180 : 880, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.32, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      o.connect(g); g.connect(ac.destination);
+      o.start(t); o.stop(t + 0.2);
+    }
+  } catch (e) {}
+}
+function buzz(pattern) {
+  try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
+}
+
+/* ── Seed data: the four training days ───────────────────────── */
+const SEED_TEMPLATES = [
+  { id: 'tpl-push', name: 'Mon · Push', items: [
+    { name: 'Incline Dumbbell Press',        sets: 4, repRange: '6-10',  restSec: 150, note: 'Elbows 45°, blades pinned' },
+    { name: 'Machine Chest Press',           sets: 3, repRange: '10-12', restSec: 120, note: 'Squeeze 1s at top' },
+    { name: 'Seated Dumbbell Shoulder Press',sets: 3, repRange: '8-12',  restSec: 120, note: 'Ribs down, stop at ears' },
+    { name: 'Cable Lateral Raise',           sets: 3, repRange: '12-15', restSec: 75,  note: 'Lead with elbow, no swing' },
+    { name: 'Overhead Cable Triceps Ext',    sets: 3, repRange: '10-15', restSec: 75,  note: 'Elbows forward and still' },
+    { name: 'Triceps Pushdown',              sets: 2, repRange: '12-15', restSec: 60,  note: 'Elbows glued to ribs' },
+    { name: 'Standing Calf Raise',           sets: 3, repRange: '12-20', restSec: 60,  note: '2s stretch at bottom' }
+  ]},
+  { id: 'tpl-pull', name: 'Tue · Pull', items: [
+    { name: 'Trap-Bar Deadlift',   sets: 3, repRange: '5-8',   restSec: 180, note: 'Slack out, push the floor away' },
+    { name: 'Lat Pulldown',        sets: 3, repRange: '8-12',  restSec: 120, note: 'Elbows down and back' },
+    { name: 'Chest-Supported Row', sets: 3, repRange: '10-12', restSec: 120, note: 'Chest never leaves the pad' },
+    { name: 'Seated Cable Row',    sets: 3, repRange: '10-15', restSec: 90,  note: 'Torso vertical, no rocking' },
+    { name: 'Face Pull',           sets: 3, repRange: '15-20', restSec: 60,  note: 'To forehead, elbows high' },
+    { name: 'Incline Dumbbell Curl', sets: 3, repRange: '8-12', restSec: 75, note: 'Upper arm stays behind torso' },
+    { name: 'Cable Hammer Curl',   sets: 2, repRange: '12-15', restSec: 60,  note: 'Neutral wrist, elbows pinned' },
+    { name: 'Dead Hang', type: 'time', sets: 2, targetSec: 45, restSec: 60,  note: 'Shoulders active, not slumped' }
+  ]},
+  { id: 'tpl-legs', name: 'Thu · Legs', items: [
+    { name: 'Hack Squat',              sets: 4, repRange: '6-10',  restSec: 180, note: 'Stop when the pelvis tucks' },
+    { name: 'Leg Press',               sets: 3, repRange: '10-15', restSec: 150, note: 'Lower back flat on the pad' },
+    { name: 'Seated Leg Curl',         sets: 4, repRange: '10-15', restSec: 90,  note: '3s controlled return' },
+    { name: 'Bulgarian Split Squat',   sets: 3, repRange: '8-12',  restSec: 90,  note: 'Front shin vertical, weak leg first' },
+    { name: '45° Back Extension',      sets: 3, repRange: '12-15', restSec: 75,  note: 'Straight line, no hyperextension' },
+    { name: 'Seated Calf Raise',       sets: 3, repRange: '15-20', restSec: 60,  note: 'Full stretch, 1s squeeze' },
+    { name: 'Cable Crunch',            sets: 3, repRange: '12-15', restSec: 60,  note: 'Ribs to pelvis, exhale hard' }
+  ]},
+  { id: 'tpl-upper', name: 'Fri · Upper', items: [
+    { name: 'Seated Machine Shoulder Press', sets: 3, repRange: '8-12',  restSec: 120, note: 'Back on pad, ribs down' },
+    { name: 'Assisted Pull-Up',              sets: 3, repRange: '8-12',  restSec: 120, note: '3s negative, no kipping' },
+    { name: 'Cable Chest Fly',               sets: 3, repRange: '12-15', restSec: 90,  note: 'Constant elbow bend' },
+    { name: 'Single-Arm Cable Row',          sets: 3, repRange: '10-12', restSec: 90,  note: 'Let the blade travel forward' },
+    { name: 'Dumbbell Lateral Raise',        sets: 4, repRange: '12-20', restSec: 60,  note: 'Light and strict' },
+    { name: 'Reverse Pec Deck',              sets: 3, repRange: '15-20', restSec: 60,  note: 'Thumbs down, no shrug' },
+    { name: 'EZ-Bar Curl',                   sets: 2, repRange: '10-15', restSec: 60,  note: 'No hip drive' },
+    { name: 'Plank', type: 'time', sets: 3, targetSec: 45, restSec: 45,  note: 'Glutes squeezed, ribs down, straight line' }
+  ]}
+];
+
+/* Extra timed movements available in the library from day one. */
+const SEED_EXTRA_TIME = [
+  { name: 'Side Plank', rest: 45 },
+  { name: 'Farmer\u2019s Carry', rest: 90 },
+  { name: 'Treadmill Incline Walk', rest: 60 },
+  { name: 'Stationary Bike', rest: 60 },
+  { name: 'Wall Sit', rest: 60 }
+];
+
+const SEED_EXERCISES = (() => {
+  let list = [];
+  SEED_TEMPLATES.forEach(t => t.items.forEach(it => {
+    list = addExerciseTo(list, it.name, { type: it.type || 'reps', defaultRestSec: it.restSec, custom: false }).list;
+  }));
+  SEED_EXTRA_TIME.forEach(x => { list = addExerciseTo(list, x.name, { type: 'time', defaultRestSec: x.rest, custom: false }).list; });
+  return list;
+})();
+
+/* The seeded rest times now live on the exercises, so the routines drop
+   their own copies and inherit. Change "Bench Press" to 180s once in the
+   library and every routine that uses it follows. */
+const SEED_ROUTINES = SEED_TEMPLATES.map(t => ({
+  ...t,
+  items: t.items.map(({ restSec, ...rest }) => rest)
+}));
+
+const DEFAULT_STATE = {
+  exercises: SEED_EXERCISES,
+  templates: SEED_ROUTINES,
+  history: [],
+  session: null,
+  settings: { webhookUrl: '', sound: true, vibrate: true, defaultRest: 120, autoSync: true }
+};
+
+/* Older saves predate the type/isFavorite fields. Fill them in on load
+   rather than making every read site defensive. */
+function migrate(d) {
+  if (!d) return DEFAULT_STATE;
+  const s = { ...DEFAULT_STATE, ...d };
+  s.settings = { ...DEFAULT_STATE.settings, ...(d.settings || {}) };
+  s.exercises = (d.exercises || []).map(e => ({ type: 'reps', isFavorite: false, custom: true, defaultRestSec: null, ...e }));
+  s.templates = (d.templates || []).map(t => ({ ...t, items: (t.items || []).map(i => ({ type: 'reps', ...i })) }));
+  s.history = d.history || [];
+  if (s.session) {
+    s.session = {
+      ...s.session,
+      entries: (s.session.entries || []).map(e => ({
+        type: 'reps', ...e,
+        sets: (e.sets || []).map(st => ({ duration: '', ...st }))
+      }))
+    };
+  }
+  return s;
+}
+
+const blankSet = (over = {}) => ({ weight: '', reps: '', duration: '', rpe: '', done: false, ...over });
+
+/* Rest is resolved in order of how specific the instruction is:
+   1. a restSec written into this routine (a deliberate prescription)
+   2. the exercise's own defaultRestSec from your library
+   3. the global fallback in Settings
+   Saving a session as a routine strips restSec wherever it already
+   matches the library value, so the routine keeps inheriting. */
+function restFor(item, library, globalRest) {
+  if (item.restSec != null && item.restSec !== '') return Number(item.restSec);
+  const ex = findExercise(library, item.name);
+  if (ex && ex.defaultRestSec != null) return Number(ex.defaultRestSec);
+  return globalRest;
+}
+
+function entriesFromItems(items, settings, library = []) {
+  return items.map(it => ({
+    id: uid(),
+    name: it.name,
+    type: it.type === 'time' ? 'time' : 'reps',
+    restSec: restFor(it, library, settings.defaultRest),
+    repRange: it.repRange || '',
+    targetSec: it.targetSec || null,
+    note: it.note || '',
+    sets: Array.from({ length: it.sets || 3 }, () => blankSet({
+      weight: it.weight != null ? String(it.weight) : '',
+      duration: it.targetSec != null ? String(it.targetSec) : ''
+    }))
+  }));
+}
+
+/* ── Small UI primitives ─────────────────────────────────────── */
+const Btn = ({ tone = 'ghost', className = '', children, ...p }) => {
+  const tones = {
+    primary: 'bg-amber text-ink font-bold active:bg-amber/80',
+    ghost:   'bg-raise text-txt border border-line active:bg-line',
+    danger:  'bg-transparent text-bad border border-bad/40 active:bg-bad/10',
+    plain:   'bg-transparent text-muted active:text-txt'
+  };
+  return (
+    <button {...p} className={`rounded-xl px-4 min-h-[48px] text-[15px] transition-colors ${tones[tone]} ${className}`}>
+      {children}
+    </button>
+  );
+};
+
+const Field = ({ label, className = '', ...p }) => (
+  <label className={`block ${className}`}>
+    {label && <span className="block text-[11px] uppercase tracking-[0.12em] text-muted mb-1.5">{label}</span>}
+    <input
+      {...p}
+      className="w-full bg-ink border border-line rounded-xl px-3 py-3 text-txt placeholder-muted/50 num focus:border-amber focus:outline-none"
+    />
+  </label>
+);
+
+const Seg = ({ value, onChange, options, size = 'sm' }) => (
+  <div className="inline-flex bg-ink border border-line rounded-lg p-0.5">
+    {options.map(o => (
+      <button key={o.v} onClick={() => onChange(o.v)}
+        className={`${size === 'sm' ? 'px-2.5 py-1 text-[11px]' : 'px-4 py-2 text-[13px]'} rounded-md transition-colors ${
+          value === o.v ? 'bg-amber text-ink font-semibold' : 'text-muted'}`}>
+        {o.label}
+      </button>
+    ))}
+  </div>
+);
+
+const Sheet = ({ open, onClose, title, children }) => {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end" role="dialog" aria-modal="true">
+      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
+      <div className="relative w-full bg-panel border-t border-line rounded-t-3xl max-h-[88vh] overflow-y-auto safe-b">
+        <div className="sticky top-0 bg-panel px-5 pt-4 pb-3 flex items-center justify-between border-b border-line">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <button onClick={onClose} className="text-muted text-2xl leading-none px-2" aria-label="Close">×</button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+};
+
+/* ────────────────────────────────────────────────────────────────
+   Timer engine
+
+   One clock drives everything: rest countdowns, plank countdowns, and
+   the stopwatch. It stores a start stamp plus accumulated milliseconds
+   rather than a decrementing counter, so pausing is exact and the
+   reading stays correct if the tick is throttled in a background tab.
+   ──────────────────────────────────────────────────────────────── */
+const elapsedMs = (t, now) => (t ? t.accumMs + (t.running ? now - t.startedAt : 0) : 0);
+
+function App() {
+  const [state, setState] = useState(null);
+  const [tab, setTab] = useState('log');
+  const [toast, setToast] = useState('');
+  const [timer, setTimer] = useState(null);
+  const [dialOpen, setDialOpen] = useState(false);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => { store.load().then(d => setState(migrate(d))); }, []);
+  useEffect(() => { if (state) store.save(state); }, [state]);
+
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(i);
+  }, []);
+
+  const say = useCallback(msg => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 2600);
+  }, []);
+
+  /* Countdown reaching zero: chime once, then freeze at the target. */
+  useEffect(() => {
+    if (!timer || timer.mode !== 'countdown' || !timer.running) return;
+    if (timer.targetSec * 1000 - elapsedMs(timer, now) > 0) return;
+    if (state?.settings.sound) beep(3);
+    if (state?.settings.vibrate) buzz([220, 90, 220, 90, 420]);
+    setTimer(t => (t ? { ...t, running: false, startedAt: null, accumMs: t.targetSec * 1000, finished: true } : t));
+  }, [now, timer, state]);
+
+  /* A finished rest bar clears itself so it doesn't sit there mid-set. */
+  useEffect(() => {
+    if (!timer || !timer.finished || timer.kind !== 'rest' || dialOpen) return;
+    const id = setTimeout(() => setTimer(null), 4000);
+    return () => clearTimeout(id);
+  }, [timer, dialOpen]);
+
+  const startRest = useCallback((secs, label) => {
+    unlockAudio();
+    setTimer({
+      kind: 'rest', mode: 'countdown', targetSec: secs, label: label || 'Rest',
+      startedAt: Date.now(), accumMs: 0, running: true, laps: [], sink: null, finished: false
+    });
+    setDialOpen(false);
+  }, []);
+
+  /* Opens the dial bound to a specific set. Whatever it reads when you
+     tap "Log" is written straight into that set's duration field. */
+  const openDial = useCallback((cfg) => {
+    unlockAudio();
+    setTimer({
+      kind: 'set',
+      mode: cfg.mode || 'stopwatch',
+      targetSec: cfg.targetSec || 60,
+      label: cfg.label || '',
+      startedAt: null, accumMs: 0, running: false, laps: [],
+      sink: cfg.sink || null, finished: false
+    });
+    setDialOpen(true);
+  }, []);
+
+  const logTimeToSink = useCallback((secs) => {
+    const sink = timer?.sink;
+    if (!sink) { setDialOpen(false); setTimer(null); return; }
+    setState(p => {
+      if (!p.session) return p;
+      return {
+        ...p,
+        session: {
+          ...p.session,
+          entries: p.session.entries.map(e => e.id !== sink.entryId ? e : ({
+            ...e,
+            sets: e.sets.map((st, i) => i === sink.setIndex ? { ...st, duration: String(secs), done: true } : st)
+          }))
+        }
+      };
+    });
+    buzz(30);
+    setDialOpen(false);
+    setTimer(null);
+    say(`Logged ${dur(secs)} to set ${sink.setIndex + 1}`);
+  }, [timer, say]);
+
+  if (!state) {
+    return <div className="h-full grid place-items-center text-muted text-sm">Loading…</div>;
+  }
+
+  const props = { state, setState, say, startRest, openDial, setTab };
+  // Anything still running stays glanceable once the dial is dismissed.
+  const showBar = timer && !dialOpen && (timer.kind === 'rest' || timer.running || timer.finished);
+
+  return (
+    <div className="min-h-full flex flex-col bg-ink">
+      <header className="safe-t sticky top-0 z-30 bg-ink/95 backdrop-blur border-b border-line">
+        <div className="px-5 py-3 flex items-center justify-between">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-amber font-semibold">Iron Desk</div>
+            <div className="text-[11px] text-muted num">{today()}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => openDial({ mode: 'stopwatch', label: 'Stopwatch' })}
+              className="text-[12px] text-muted border border-line rounded-full px-3 py-1.5">Timer</button>
+            {state.session && tab !== 'log' && (
+              <button onClick={() => setTab('log')} className="text-[12px] text-amber border border-amber/40 rounded-full px-3 py-1.5">
+                Session
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 px-5 pt-4 pb-40">
+        {tab === 'log'       && <LogView {...props} />}
+        {tab === 'templates' && <TemplatesView {...props} />}
+        {tab === 'moves'     && <ExercisesView {...props} />}
+        {tab === 'history'   && <HistoryView {...props} />}
+        {tab === 'settings'  && <SettingsView {...props} />}
+      </main>
+
+      {showBar && (
+        <TimerBar
+          timer={timer} now={now}
+          onExpand={() => setDialOpen(true)}
+          onAdd={s => setTimer(t => ({ ...t, targetSec: t.targetSec + s, finished: false, running: true, startedAt: t.startedAt || Date.now() }))}
+          onSkip={() => setTimer(null)}
+        />
+      )}
+
+      {dialOpen && timer && (
+        <TimerDial
+          timer={timer} now={now}
+          onSet={fn => setTimer(t => (t ? fn(t) : t))}
+          onClose={() => { setDialOpen(false); if (timer.kind === 'set' && !timer.running && !timer.finished && timer.accumMs === 0) setTimer(null); }}
+          onLog={logTimeToSink}
+        />
+      )}
+
+      {toast && (
+        <div className="fixed left-1/2 -translate-x-1/2 bottom-28 z-40 bg-raise border border-line text-txt text-[13px] px-4 py-2.5 rounded-full shadow-xl">
+          {toast}
+        </div>
+      )}
+
+      <nav className="fixed bottom-0 inset-x-0 z-30 bg-panel border-t border-line safe-b">
+        <div className="grid grid-cols-5">
+          {[
+            ['log', 'Log'],
+            ['templates', 'Routines'],
+            ['moves', 'Exercises'],
+            ['history', 'History'],
+            ['settings', 'Settings']
+          ].map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => { unlockAudio(); setTab(k); }}
+              className={`py-3.5 text-[11px] tracking-wide ${tab === k ? 'text-amber font-semibold' : 'text-muted'}`}
+            >
+              <span className={`block h-[2px] w-6 mx-auto mb-2 rounded-full ${tab === k ? 'bg-amber' : 'bg-transparent'}`} />
+              {label}
+            </button>
+          ))}
+        </div>
+      </nav>
+    </div>
+  );
+}
+
+/* ── Compact bar. Readable from arm's length with a barbell still in
+      your hands; tap it to open the full dial. Handles both modes so a
+      plank countdown or a running stopwatch stays visible. ───────── */
+function TimerBar({ timer, now, onExpand, onAdd, onSkip }) {
+  const isCountdown = timer.mode === 'countdown';
+  const ms = elapsedMs(timer, now);
+  const left = Math.ceil((timer.targetSec * 1000 - ms) / 1000);
+  const done = isCountdown && left <= 0;
+  const shown = isCountdown ? left : Math.floor(ms / 1000);
+  const pct = isCountdown
+    ? (timer.targetSec > 0 ? clamp((left / timer.targetSec) * 100, 0, 100) : 0)
+    : (((ms / 1000) % 60) / 60) * 100;
+
+  const status = done ? 'Complete' : timer.kind === 'rest' ? 'Resting' : isCountdown ? 'Holding' : 'Stopwatch';
+
+  return (
+    <div className={`fixed bottom-[68px] inset-x-0 z-40 border-t ${done ? 'border-ok bg-ok/10' : 'border-amber/50 bg-panel'}`}>
+      <div className="h-1 bg-line">
+        <div className={`h-full ${done ? 'bg-ok' : 'bg-amber'} transition-[width] duration-200`} style={{ width: pct + '%' }} />
+      </div>
+      <div className="px-5 py-3 flex items-center gap-4">
+        <button onClick={onExpand} className="flex-1 min-w-0 text-left">
+          <div className={`text-[10px] uppercase tracking-[0.18em] ${done ? 'text-ok ring-live' : 'text-amber'}`}>{status}</div>
+          <div className="truncate text-[11px] text-muted">{timer.label}</div>
+        </button>
+        <button onClick={onExpand} className={`num text-4xl font-bold ${done ? 'text-ok' : 'text-txt'}`}>{mmss(shown)}</button>
+        {isCountdown && !done && (
+          <button onClick={() => onAdd(30)} className="text-[12px] text-muted border border-line rounded-lg px-2.5 py-2">+30s</button>
+        )}
+        <button onClick={onSkip} className="text-[12px] text-muted border border-line rounded-lg px-2.5 py-2">
+          {done ? 'Clear' : 'Stop'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Radial dial — countdown and stopwatch in one control
+   ──────────────────────────────────────────────────────────────── */
+const R = 92;
+const CIRC = 2 * Math.PI * R;
+
+function TimerDial({ timer, now, onSet, onClose, onLog }) {
+  const ms = elapsedMs(timer, now);
+  const isCountdown = timer.mode === 'countdown';
+  const leftMs = timer.targetSec * 1000 - ms;
+  const done = isCountdown && leftMs <= 0;
+
+  // Countdown drains the ring; the stopwatch sweeps one lap per minute.
+  const frac = isCountdown
+    ? (timer.targetSec > 0 ? clamp(leftMs / (timer.targetSec * 1000), 0, 1) : 0)
+    : ((ms / 1000) % 60) / 60;
+
+  const shownSec = isCountdown ? Math.max(0, Math.ceil(leftMs / 1000)) : Math.floor(ms / 1000);
+  const tenths = Math.floor((ms % 1000) / 100);
+  const loggable = isCountdown ? Math.round(Math.min(ms, timer.targetSec * 1000) / 1000) : Math.round(ms / 1000);
+
+  const start = () => onSet(t => {
+    const spent = t.mode === 'countdown' && (t.targetSec * 1000 - t.accumMs) <= 0;
+    return { ...t, running: true, startedAt: Date.now(), accumMs: spent ? 0 : t.accumMs, laps: spent ? [] : t.laps, finished: false };
+  });
+  const pause = () => onSet(t => ({ ...t, running: false, startedAt: null, accumMs: elapsedMs(t, Date.now()) }));
+  const reset = () => onSet(t => ({ ...t, running: false, startedAt: null, accumMs: 0, laps: [], finished: false }));
+  const lap = () => onSet(t => ({ ...t, laps: [...t.laps, Math.round(elapsedMs(t, Date.now()) / 1000)] }));
+  const bump = s => onSet(t => ({ ...t, targetSec: Math.max(5, t.targetSec + s), finished: false }));
+
+  const ring = done ? '#35D07F' : timer.running ? '#FFB020' : '#8A98A6';
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-ink flex flex-col safe-t safe-b" role="dialog" aria-modal="true">
+      <div className="px-5 py-4 flex items-center justify-between border-b border-line">
+        <Seg
+          value={timer.mode}
+          onChange={m => onSet(t => ({ ...t, mode: m, running: false, startedAt: null, accumMs: 0, laps: [], finished: false }))}
+          size="md"
+          options={[{ v: 'countdown', label: 'Countdown' }, { v: 'stopwatch', label: 'Stopwatch' }]}
+        />
+        <button onClick={onClose} className="text-muted text-3xl leading-none px-2" aria-label="Close timer">×</button>
+      </div>
+
+      <div className="flex-1 flex flex-col items-center justify-center px-6">
+        {timer.label && <div className="text-[12px] uppercase tracking-[0.16em] text-muted mb-6 text-center">{timer.label}</div>}
+
+        <div className="relative">
+          <svg width="240" height="240" viewBox="0 0 240 240" aria-hidden="true">
+            <circle cx="120" cy="120" r={R} fill="none" stroke="#2A333B" strokeWidth="10" />
+            <circle
+              cx="120" cy="120" r={R} fill="none" stroke={ring} strokeWidth="10" strokeLinecap="round"
+              strokeDasharray={CIRC}
+              strokeDashoffset={CIRC * (1 - frac)}
+              transform="rotate(-90 120 120)"
+              style={{ transition: timer.running ? 'none' : 'stroke-dashoffset .2s linear' }}
+            />
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className={`num font-bold tracking-tight ${done ? 'text-ok' : 'text-txt'} text-[52px] leading-none`}>
+              {mmss(shownSec)}
+            </div>
+            {!isCountdown && <div className="num text-amber text-2xl leading-none mt-1">.{tenths}</div>}
+            {isCountdown && (
+              <div className="num text-[11px] text-muted mt-2 uppercase tracking-[0.14em]">
+                {done ? 'done' : `of ${mmss(timer.targetSec)}`}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {isCountdown && (
+          <div className="flex items-center gap-2 mt-7">
+            <button onClick={() => bump(-15)} className="text-[13px] text-muted border border-line rounded-lg px-3 py-2">−15s</button>
+            {[45, 60, 90, 120, 180].map(p => (
+              <button key={p} onClick={() => onSet(t => ({ ...t, targetSec: p, accumMs: 0, startedAt: t.running ? Date.now() : null, finished: false }))}
+                className={`text-[13px] rounded-lg px-2.5 py-2 border ${timer.targetSec === p ? 'border-amber text-amber' : 'border-line text-muted'}`}>
+                {p}
+              </button>
+            ))}
+            <button onClick={() => bump(15)} className="text-[13px] text-muted border border-line rounded-lg px-3 py-2">+15s</button>
+          </div>
+        )}
+
+        {!isCountdown && timer.laps.length > 0 && (
+          <div className="mt-6 w-full max-w-xs max-h-28 overflow-y-auto space-y-1">
+            {timer.laps.map((l, i) => {
+              const split = i === 0 ? l : l - timer.laps[i - 1];
+              return (
+                <div key={i} className="flex justify-between num text-[13px] text-muted border-b border-line/60 pb-1">
+                  <span>Lap {i + 1}</span><span>+{dur(split)}</span><span className="text-txt">{mmss(l)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="px-6 pb-6 space-y-3">
+        <div className="grid grid-cols-3 gap-3">
+          <button onClick={reset} className="min-h-[56px] rounded-2xl border border-line text-muted text-[15px]">Reset</button>
+          <button onClick={timer.running ? pause : start}
+            className={`min-h-[56px] rounded-2xl font-bold text-[16px] ${timer.running ? 'bg-raise border border-amber text-amber' : 'bg-amber text-ink'}`}>
+            {timer.running ? 'Pause' : done ? 'Restart' : 'Start'}
+          </button>
+          <button onClick={lap} disabled={isCountdown || !timer.running}
+            className={`min-h-[56px] rounded-2xl border text-[15px] ${isCountdown || !timer.running ? 'border-line text-muted/40' : 'border-line text-txt'}`}>
+            Lap
+          </button>
+        </div>
+
+        {timer.sink && (
+          <button onClick={() => onLog(loggable)}
+            className="w-full min-h-[56px] rounded-2xl bg-ok text-ink font-bold text-[16px]">
+            Log {dur(loggable)} to set {timer.sink.setIndex + 1}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Log view — the active session
+   ──────────────────────────────────────────────────────────────── */
+function LogView({ state, setState, say, startRest, openDial, setTab }) {
+  const [pickTemplate, setPickTemplate] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState('');
+  const s = state.session;
+
+  const setSession = updater =>
+    setState(prev => ({ ...prev, session: typeof updater === 'function' ? updater(prev.session) : updater }));
+
+  const startBlank = () => {
+    setState(p => ({ ...p, session: { id: uid(), name: 'Free session', startedAt: Date.now(), entries: [] } }));
+    say('Session started');
+  };
+
+  const startFromTemplate = tpl => {
+    setState(p => ({
+      ...p,
+      session: { id: uid(), name: tpl.name, startedAt: Date.now(), entries: entriesFromItems(tpl.items, p.settings, p.exercises) }
+    }));
+    setPickTemplate(false);
+    say(`Loaded ${tpl.name}`);
+  };
+
+  /* ── Import a routine generated by Claude ──────────────────── */
+  const importRoutine = () => {
+    let data;
+    try { data = JSON.parse(importText); }
+    catch (e) { say("That isn't valid JSON. Check for a missing bracket."); return; }
+
+    const list = Array.isArray(data) ? data : data.exercises || data.items;
+    if (!Array.isArray(list) || list.length === 0) {
+      say('No exercises found. Expected an "exercises" array.');
+      return;
+    }
+
+    const items = list.map(it => ({
+      name: String(it.name || it.exercise || 'Unnamed'),
+      type: (it.type === 'time' || it.targetSec != null || it.durationSec != null) ? 'time' : 'reps',
+      sets: Number(it.sets) || 3,
+      repRange: String(it.repRange || it.reps || ''),
+      restSec: (it.restSec != null || it.rest != null) ? Number(it.restSec != null ? it.restSec : it.rest) : null,
+      defaultRestSec: it.defaultRestSec != null ? Number(it.defaultRestSec) : null,
+      targetSec: it.targetSec != null ? Number(it.targetSec) : (it.durationSec != null ? Number(it.durationSec) : null),
+      weight: it.weight,
+      note: String(it.note || it.cue || '')
+    }));
+
+    setState(p => {
+      // Any name Claude sends that we don't already have joins the library,
+      // once, with its tracking mode carried across.
+      let lib = p.exercises;
+      items.forEach(it => {
+        const proposed = it.defaultRestSec != null ? it.defaultRestSec : it.restSec;
+        const r = addExerciseTo(lib, it.name, { type: it.type, custom: true, defaultRestSec: proposed });
+        lib = r.list;
+        if (!r.added && proposed != null && r.exercise.defaultRestSec == null) {
+          lib = lib.map(x => x.id === r.exercise.id ? { ...x, defaultRestSec: Number(proposed) } : x);
+        }
+      });
+      return {
+        ...p,
+        exercises: lib,
+        session: { id: uid(), name: String(data.name || 'Imported routine'), startedAt: Date.now(), entries: entriesFromItems(items, p.settings, lib) }
+      };
+    });
+    setImportText('');
+    setImportOpen(false);
+    say(`Imported ${items.length} exercises`);
+  };
+
+  if (!s) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-1">No session running</h1>
+        <p className="text-muted text-sm mb-6">Pick a routine, paste one from Claude, or build as you go.</p>
+        <div className="space-y-3">
+          <Btn tone="primary" className="w-full" onClick={() => setPickTemplate(true)}>Start from a routine</Btn>
+          <Btn className="w-full" onClick={() => setImportOpen(true)}>Paste routine from Claude</Btn>
+          <Btn className="w-full" onClick={startBlank}>Start an empty session</Btn>
+        </div>
+
+        {state.history.length > 0 && (
+          <div className="mt-10">
+            <h2 className="text-[11px] uppercase tracking-[0.14em] text-muted mb-3">Last session</h2>
+            <SessionCard w={state.history[0]} />
+          </div>
+        )}
+
+        <Sheet open={pickTemplate} onClose={() => setPickTemplate(false)} title="Choose a routine">
+          <div className="space-y-2">
+            {state.templates.map(t => (
+              <button key={t.id} onClick={() => startFromTemplate(t)}
+                className="w-full text-left bg-raise border border-line rounded-2xl p-4 active:bg-line">
+                <div className="font-semibold">{t.name}</div>
+                <div className="text-[12px] text-muted mt-0.5 num">
+                  {t.items.length} exercises · {t.items.reduce((a, b) => a + (b.sets || 0), 0)} sets
+                </div>
+              </button>
+            ))}
+            {state.templates.length === 0 && <p className="text-muted text-sm">No routines saved yet.</p>}
+          </div>
+        </Sheet>
+
+        <ImportSheet open={importOpen} onClose={() => setImportOpen(false)}
+          value={importText} onChange={setImportText} onImport={importRoutine} />
+      </div>
+    );
+  }
+
+  /* ── Active session ──────────────────────────────────────── */
+  const isRepSet = (e, st) => e.type !== 'time';
+  const totalVolume = s.entries.reduce((sum, e) =>
+    sum + e.sets.reduce((a, st) => a + (st.done && isRepSet(e, st) ? num(st.weight) * num(st.reps) : 0), 0), 0);
+  const totalTime = s.entries.reduce((sum, e) =>
+    sum + e.sets.reduce((a, st) => a + (st.done && e.type === 'time' ? num(st.duration) : 0), 0), 0);
+  const doneSets = s.entries.reduce((a, e) => a + e.sets.filter(x => x.done).length, 0);
+  const allSets = s.entries.reduce((a, e) => a + e.sets.length, 0);
+  const elapsed = Math.floor((Date.now() - s.startedAt) / 60000);
+
+  const buildExport = () => ({
+    app: 'IronDesk', version: 2,
+    date: today(),
+    workout: s.name,
+    durationMin: elapsed,
+    totalVolumeKg: Math.round(totalVolume),
+    totalTimeSec: Math.round(totalTime),
+    exercises: s.entries.map(e => ({
+      name: e.name,
+      type: e.type || 'reps',
+      repRange: e.repRange || null,
+      volumeKg: Math.round(e.sets.reduce((a, st) => a + (st.done && e.type !== 'time' ? num(st.weight) * num(st.reps) : 0), 0)),
+      timeSec: Math.round(e.sets.reduce((a, st) => a + (st.done && e.type === 'time' ? num(st.duration) : 0), 0)),
+      sets: e.sets.filter(x => x.done).map((st, i) => ({
+        set: i + 1,
+        weightKg: num(st.weight),
+        reps: e.type === 'time' ? null : num(st.reps),
+        durationSec: e.type === 'time' ? num(st.duration) : null,
+        rpe: st.rpe ? num(st.rpe) : null
+      }))
+    })).filter(e => e.sets.length > 0)
+  });
+
+  const buildRows = () => {
+    const rows = [];
+    s.entries.forEach(e => {
+      e.sets.forEach((st, i) => {
+        if (!st.done) return;
+        const isTime = e.type === 'time';
+        rows.push([
+          today(), s.name, e.name, e.type || 'reps', i + 1,
+          num(st.weight),
+          isTime ? '' : num(st.reps),
+          isTime ? num(st.duration) : '',
+          st.rpe ? num(st.rpe) : '',
+          isTime ? '' : Math.round(num(st.weight) * num(st.reps)),
+          e.note || ''
+        ]);
+      });
+    });
+    return rows;
+  };
+
+  const exportJSON = () => {
+    copyText(JSON.stringify(buildExport(), null, 2)).then(() => say('Workout JSON copied. Paste it to Claude.'));
+  };
+
+  const pushToSheet = async (silent) => {
+    const url = state.settings.webhookUrl.trim();
+    if (!url) { if (!silent) say('Add your Apps Script URL in Settings first.'); return false; }
+    const rows = buildRows();
+    if (rows.length === 0) { if (!silent) say('No completed sets to send.'); return false; }
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },  // avoids a CORS preflight
+        body: JSON.stringify({ rows })
+      });
+      if (!silent) say(`Sent ${rows.length} rows to your sheet`);
+      return true;
+    } catch (err) {
+      try {
+        await fetch(url, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ rows }) });
+        if (!silent) say(`Sent ${rows.length} rows (delivery unconfirmed)`);
+        return true;
+      } catch (e2) {
+        if (!silent) say("Couldn't reach the sheet. Check the URL and your connection.");
+        return false;
+      }
+    }
+  };
+
+  const finish = async () => {
+    if (doneSets === 0) { say('Tick at least one set before finishing.'); return; }
+    if (state.settings.autoSync && state.settings.webhookUrl.trim()) await pushToSheet(true);
+    const record = { ...buildExport(), id: s.id, finishedAt: Date.now() };
+    setState(p => ({ ...p, history: [record, ...p.history].slice(0, 200), session: null }));
+    say('Workout saved');
+    setTab('history');
+  };
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div className="min-w-0">
+          <input
+            value={s.name}
+            onChange={e => setSession(x => ({ ...x, name: e.target.value }))}
+            className="bg-transparent text-2xl font-bold w-full focus:outline-none focus:text-amber"
+            aria-label="Workout name"
+          />
+          <div className="text-[12px] text-muted num mt-0.5">
+            {elapsed} min · {doneSets}/{allSets} sets · {Math.round(totalVolume).toLocaleString()} kg
+            {totalTime > 0 && <> · {dur(Math.round(totalTime))} held</>}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {s.entries.map((e, ei) => (
+          <ExerciseCard
+            key={e.id}
+            entry={e}
+            history={state.history}
+            onChange={fn => setSession(x => ({ ...x, entries: x.entries.map((y, i) => i === ei ? fn(y) : y) }))}
+            onRemove={() => setSession(x => ({ ...x, entries: x.entries.filter((_, i) => i !== ei) }))}
+            onRest={() => startRest(e.restSec || state.settings.defaultRest, e.name)}
+            openDial={openDial}
+          />
+        ))}
+      </div>
+
+      <div className="mt-5 space-y-3">
+        <Btn className="w-full" onClick={() => setAddOpen(true)}>+ Add exercise</Btn>
+        <div className="grid grid-cols-2 gap-3">
+          <Btn onClick={exportJSON}>Copy workout JSON</Btn>
+          <Btn onClick={() => pushToSheet(false)}>Send to sheet</Btn>
+        </div>
+        <Btn tone="primary" className="w-full" onClick={finish}>Finish workout</Btn>
+        <Btn tone="danger" className="w-full" onClick={() => {
+          if (sure('Discard this session? Logged sets will be lost.')) {
+            setState(p => ({ ...p, session: null }));
+          }
+        }}>Discard session</Btn>
+      </div>
+
+      <AddExerciseSheet
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        state={state}
+        setState={setState}
+        say={say}
+        onPick={(ex) => {
+          setSession(x => ({
+            ...x,
+            entries: [...x.entries, {
+              id: uid(), name: ex.name, type: ex.type || 'reps',
+              restSec: ex.defaultRestSec != null ? ex.defaultRestSec : state.settings.defaultRest,
+              repRange: '', targetSec: null, note: '',
+              sets: [blankSet()]
+            }]
+          }));
+          setAddOpen(false);
+        }}
+      />
+    </div>
+  );
+}
+
+/* ── One exercise, with its sets ─────────────────────────────── */
+function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) {
+  const [open, setOpen] = useState(true);
+  const isTime = entry.type === 'time';
+
+  const last = useMemo(() => {
+    for (const w of history) {
+      const hit = (w.exercises || []).find(x => x.name === entry.name);
+      if (hit && hit.sets.length) {
+        if ((hit.type || 'reps') === 'time') {
+          const best = hit.sets.reduce((a, b) => ((b.durationSec || 0) > (a.durationSec || 0) ? b : a));
+          return `${dur(best.durationSec || 0)} · ${w.date}`;
+        }
+        const best = hit.sets.reduce((a, b) => (b.weightKg > a.weightKg ? b : a));
+        return `${best.weightKg} kg × ${best.reps} · ${w.date}`;
+      }
+    }
+    return null;
+  }, [history, entry.name]);
+
+  const upd = (i, key, val) =>
+    onChange(e => ({ ...e, sets: e.sets.map((st, j) => j === i ? { ...st, [key]: val } : st) }));
+
+  const toggle = i => {
+    const wasDone = entry.sets[i].done;
+    onChange(e => ({ ...e, sets: e.sets.map((st, j) => j === i ? { ...st, done: !st.done } : st) }));
+    if (!wasDone) { buzz(30); onRest(); }
+  };
+
+  const addSet = () => onChange(e => {
+    const prev = e.sets[e.sets.length - 1];
+    return { ...e, sets: [...e.sets, blankSet({ weight: prev ? prev.weight : '', duration: prev ? prev.duration : '' })] };
+  });
+
+  const doneCount = entry.sets.filter(x => x.done).length;
+  const cols = 'grid grid-cols-[26px_1fr_1fr_46px_46px] gap-2';
+
+  return (
+    <section className="bg-panel border border-line rounded-2xl overflow-hidden">
+      <div className="px-4 py-3 flex items-center gap-3">
+        <button onClick={() => setOpen(o => !o)} className="flex-1 text-left min-w-0">
+          <div className="font-semibold leading-tight truncate">{entry.name}</div>
+          <div className="text-[11px] text-muted num mt-0.5">
+            {doneCount}/{entry.sets.length} sets
+            {isTime
+              ? (entry.targetSec ? <> · target {dur(entry.targetSec)}</> : null)
+              : (entry.repRange ? <> · target {entry.repRange}</> : null)}
+            {entry.restSec ? <> · rest {mmss(entry.restSec)}</> : null}
+          </div>
+        </button>
+        <span className={`num text-[11px] px-2 py-1 rounded-md ${doneCount === entry.sets.length ? 'bg-ok/15 text-ok' : 'bg-raise text-muted'}`}>
+          {doneCount === entry.sets.length ? 'done' : open ? '▾' : '▸'}
+        </span>
+      </div>
+
+      {open && (
+        <div className="px-4 pb-4">
+          {entry.note && <p className="text-[12px] text-amber/80 mb-3 leading-snug">{entry.note}</p>}
+
+          <div className="flex items-center gap-2 mb-3">
+            <Seg
+              value={entry.type || 'reps'}
+              onChange={t => onChange(e => ({ ...e, type: t }))}
+              options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]}
+            />
+            <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+              <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
+              <input inputMode="numeric" value={entry.restSec}
+                onChange={e => onChange(x => ({ ...x, restSec: num(e.target.value) }))}
+                aria-label={`Rest for ${entry.name} in seconds`}
+                className="num w-9 bg-transparent text-center text-[13px] text-txt focus:outline-none" />
+              <span className="text-[11px] text-muted">s</span>
+            </label>
+            {last && <span className="text-[11px] text-muted num truncate ml-auto">Best: {last}</span>}
+          </div>
+
+          <div className={`${cols} text-[10px] uppercase tracking-wider text-muted mb-1.5 px-1`}>
+            <span>#</span><span>kg</span><span>{isTime ? 'secs' : 'reps'}</span><span>{isTime ? '⏱' : 'rpe'}</span><span></span>
+          </div>
+
+          <div className="space-y-2">
+            {entry.sets.map((st, i) => (
+              <div key={i} className={`${cols} items-center`}>
+                <span className={`num text-center text-sm ${st.done ? 'text-ok' : 'text-muted'}`}>{i + 1}</span>
+
+                <input inputMode="decimal" placeholder="—" value={st.weight}
+                  onChange={e => upd(i, 'weight', e.target.value)}
+                  aria-label={`Set ${i + 1} weight`}
+                  className={`num text-center bg-ink border rounded-lg py-3 text-lg focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`} />
+
+                {isTime ? (
+                  <input inputMode="numeric" placeholder="—" value={st.duration}
+                    onChange={e => upd(i, 'duration', e.target.value)}
+                    aria-label={`Set ${i + 1} duration in seconds`}
+                    className={`num text-center bg-ink border rounded-lg py-3 text-lg focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`} />
+                ) : (
+                  <input inputMode="numeric" placeholder="—" value={st.reps}
+                    onChange={e => upd(i, 'reps', e.target.value)}
+                    aria-label={`Set ${i + 1} reps`}
+                    className={`num text-center bg-ink border rounded-lg py-3 text-lg focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`} />
+                )}
+
+                {isTime ? (
+                  <button
+                    onClick={() => openDial({
+                      mode: num(st.duration) > 0 ? 'countdown' : 'stopwatch',
+                      targetSec: num(st.duration) || entry.targetSec || 60,
+                      label: `${entry.name} · set ${i + 1}`,
+                      sink: { entryId: entry.id, setIndex: i }
+                    })}
+                    aria-label={`Time set ${i + 1}`}
+                    className="h-12 rounded-lg border border-amber/40 text-amber text-lg active:bg-amber/10">⏱</button>
+                ) : (
+                  <input inputMode="decimal" placeholder="—" value={st.rpe}
+                    onChange={e => upd(i, 'rpe', e.target.value)}
+                    aria-label={`Set ${i + 1} RPE`}
+                    className="num text-center bg-ink border border-line rounded-lg py-3 text-sm text-muted focus:outline-none focus:border-amber" />
+                )}
+
+                <button onClick={() => toggle(i)} aria-label={st.done ? 'Undo set' : 'Complete set'}
+                  className={`h-12 rounded-lg border text-lg font-bold ${st.done ? 'bg-ok text-ink border-ok' : 'bg-raise border-line text-muted'}`}>
+                  ✓
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex gap-2 mt-3">
+            <button onClick={addSet} className="flex-1 text-[13px] text-muted border border-line rounded-lg py-2.5 active:bg-raise">+ Set</button>
+            <button onClick={onRest} className="flex-1 text-[13px] text-amber border border-amber/40 rounded-lg py-2.5 active:bg-amber/10">Rest</button>
+            <button onClick={onRemove} className="px-4 text-[13px] text-bad border border-bad/30 rounded-lg py-2.5">Remove</button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ── Add exercise / create a custom machine name ─────────────── */
+function AddExerciseSheet({ open, onClose, state, setState, onPick, say }) {
+  const [q, setQ] = useState('');
+  const [newType, setNewType] = useState('reps');
+
+  const matches = state.exercises.filter(e => normalize(e.name).includes(normalize(q)));
+  const list = [...matches].sort((a, b) =>
+    (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || a.name.localeCompare(b.name));
+  const duplicate = !!findExercise(state.exercises, q);
+
+  const createAndPick = () => {
+    const name = q.trim();
+    if (!name) return;
+    const r = addExerciseTo(state.exercises, name, { type: newType });
+    if (r.added) setState(p => ({ ...p, exercises: addExerciseTo(p.exercises, name, { type: newType }).list }));
+    onPick(r.exercise);
+    setQ('');
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} title="Add exercise">
+      <Field placeholder="Search, or type a new machine name" value={q} onChange={e => setQ(e.target.value)} />
+
+      {q.trim() && !duplicate && (
+        <div className="mt-3 bg-raise border border-line rounded-xl p-3">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[12px] text-muted">Track this as</span>
+            <Seg value={newType} onChange={setNewType}
+              options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
+          </div>
+          <button onClick={createAndPick} className="w-full bg-amber text-ink font-semibold rounded-lg py-3">
+            Create “{q.trim()}”
+          </button>
+        </div>
+      )}
+      {q.trim() && duplicate && (
+        <p className="text-[12px] text-muted mt-2">Already in your library — pick it below.</p>
+      )}
+
+      <div className="mt-3 space-y-1.5 max-h-[46vh] overflow-y-auto">
+        {list.map(e => (
+          <button key={e.id} onClick={() => { onPick(e); setQ(''); }}
+            className="w-full text-left bg-raise border border-line rounded-xl px-4 py-3.5 active:bg-line flex justify-between items-center gap-3">
+            <span className="truncate">{e.isFavorite && <span className="text-amber mr-1.5">★</span>}{e.name}</span>
+            <span className="flex items-center gap-2 shrink-0">
+              {e.type === 'time' && <span className="text-[10px] uppercase tracking-wider text-muted">time</span>}
+              <span className="num text-[10px] text-muted">
+                {e.defaultRestSec != null ? `${e.defaultRestSec}s` : `${state.settings.defaultRest}s`}
+              </span>
+              {e.custom && <span className="text-[10px] uppercase tracking-wider text-amber">custom</span>}
+            </span>
+          </button>
+        ))}
+        {list.length === 0 && !q.trim() && <p className="text-muted text-sm">Your exercise list is empty.</p>}
+      </div>
+    </Sheet>
+  );
+}
+
+/* ── Paste-from-Claude sheet ─────────────────────────────────── */
+function ImportSheet({ open, onClose, value, onChange, onImport }) {
+  const schema = `{
+  "name": "Fri · Upper",
+  "exercises": [
+    { "name": "Bench Press",
+      "type": "reps", "sets": 4, "repRange": "6-8",
+      "defaultRestSec": 180, "weight": 50,
+      "note": "Blades pinned, elbows 45°" },
+
+    { "name": "Plank",
+      "type": "time", "sets": 3, "targetSec": 45,
+      "defaultRestSec": 60,
+      "note": "Glutes squeezed, ribs down" }
+  ]
+}`;
+  return (
+    <Sheet open={open} onClose={onClose} title="Paste routine from Claude">
+      <p className="text-[13px] text-muted mb-3 leading-relaxed">
+        Ask Claude for your routine in this shape, then paste the JSON below. Use
+        <span className="text-txt"> type: "time"</span> with a
+        <span className="text-txt"> targetSec</span> for planks, carries and cardio.
+        <span className="text-txt"> defaultRestSec</span> is saved to your library and reused everywhere;
+        <span className="text-txt"> restSec</span> overrides it for this routine only.
+      </p>
+      <pre className="bg-ink border border-line rounded-xl p-3 text-[11px] text-muted overflow-x-auto mb-4 num">{schema}</pre>
+      <textarea
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="Paste JSON here"
+        rows={8}
+        className="w-full bg-ink border border-line rounded-xl p-3 text-[13px] font-mono focus:outline-none focus:border-amber"
+      />
+      <div className="grid grid-cols-2 gap-3 mt-4">
+        <Btn onClick={() => { copyText(schema); }}>Copy the schema</Btn>
+        <Btn tone="primary" onClick={onImport}>Load routine</Btn>
+      </div>
+    </Sheet>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Routines
+   ──────────────────────────────────────────────────────────────── */
+function TemplatesView({ state, setState, say, setTab }) {
+  const [editing, setEditing] = useState(null);
+
+  const saveCurrentAsTemplate = () => {
+    const s = state.session;
+    if (!s) { say('Start a session first, then save it as a routine.'); return; }
+    const name = ask('Name this routine', s.name);
+    if (!name) return;
+    const tpl = {
+      id: uid(), name,
+      items: s.entries.map(e => {
+        const lib = findExercise(state.exercises, e.name);
+        const inherits = lib && lib.defaultRestSec != null && Number(lib.defaultRestSec) === Number(e.restSec);
+        return {
+          name: e.name, type: e.type || 'reps', sets: e.sets.length,
+          repRange: e.repRange || '', targetSec: e.targetSec || (e.type === 'time' ? num(e.sets[0]?.duration) || null : null),
+          restSec: inherits ? null : e.restSec, note: e.note || ''
+        };
+      })
+    };
+    setState(p => ({ ...p, templates: [...p.templates, tpl] }));
+    say('Routine saved');
+  };
+
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-1">Routines</h1>
+      <p className="text-muted text-sm mb-5">Your four training days, ready to load.</p>
+
+      <div className="space-y-3">
+        {state.templates.map(t => (
+          <div key={t.id} className="bg-panel border border-line rounded-2xl p-4">
+            <div className="flex justify-between items-start gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold">{t.name}</div>
+                <div className="text-[12px] text-muted num mt-0.5">
+                  {t.items.length} exercises · {t.items.reduce((a, b) => a + (b.sets || 0), 0)} sets
+                </div>
+              </div>
+              <button onClick={() => setEditing(editing === t.id ? null : t.id)} className="text-muted text-[12px] px-2">
+                {editing === t.id ? 'Hide' : 'View'}
+              </button>
+            </div>
+
+            {editing === t.id && (
+              <ul className="mt-3 space-y-1.5 border-t border-line pt-3">
+                {t.items.map((it, i) => (
+                  <li key={i} className="text-[13px] flex justify-between gap-3">
+                    <span className="truncate">{it.name}</span>
+                    <span className="num text-muted whitespace-nowrap">
+                      {it.sets}×{it.type === 'time' ? dur(it.targetSec || 0) : it.repRange}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 mt-3">
+              <button
+                onClick={() => {
+                  setState(p => ({
+                    ...p,
+                    session: { id: uid(), name: t.name, startedAt: Date.now(), entries: entriesFromItems(t.items, p.settings, p.exercises) }
+                  }));
+                  setTab('log');
+                }}
+                className="bg-amber text-ink font-semibold rounded-xl py-3">Start</button>
+              <button
+                onClick={() => { if (sure(`Delete ${t.name}?`)) setState(p => ({ ...p, templates: p.templates.filter(x => x.id !== t.id) })); }}
+                className="text-bad border border-bad/30 rounded-xl py-3 text-[14px]">Delete</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Btn className="w-full mt-4" onClick={saveCurrentAsTemplate}>Save current session as a routine</Btn>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Exercise library
+   ──────────────────────────────────────────────────────────────── */
+function ExercisesView({ state, setState, say }) {
+  const [name, setName] = useState('');
+  const [type, setType] = useState('reps');
+  const [rest, setRestField] = useState('');
+  const [filter, setFilter] = useState('all');
+
+  const add = () => {
+    const clean = name.trim();
+    if (!clean) return;
+    if (findExercise(state.exercises, clean)) { say(`“${clean}” is already in your library`); return; }
+    const defaultRestSec = String(rest).trim() === '' ? null : Math.max(0, num(rest));
+    setState(p => ({ ...p, exercises: addExerciseTo(p.exercises, clean, { type, defaultRestSec }).list }));
+    setName('');
+    setRestField('');
+    say('Exercise added');
+  };
+
+  const toggleFav = id => setState(p => ({
+    ...p, exercises: p.exercises.map(e => e.id === id ? { ...e, isFavorite: !e.isFavorite } : e)
+  }));
+
+  const setType2 = (id, t) => setState(p => ({
+    ...p, exercises: p.exercises.map(e => e.id === id ? { ...e, type: t } : e)
+  }));
+
+  // Blank means "fall back to the global default", so store null, not 0.
+  const setRest = (id, val) => setState(p => ({
+    ...p,
+    exercises: p.exercises.map(e => e.id === id
+      ? { ...e, defaultRestSec: String(val).trim() === '' ? null : Math.max(0, num(val)) }
+      : e)
+  }));
+
+  const shown = state.exercises
+    .filter(e => filter === 'all' || (filter === 'fav' ? e.isFavorite : e.type === filter))
+    .sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || a.name.localeCompare(b.name));
+
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-1">Exercises</h1>
+      <p className="text-muted text-sm mb-5">
+        Add the machines your gym actually has — colour, brand, whatever you call them on the floor.
+        Names are matched case-insensitively, so nothing can land in here twice. Set a rest time
+        per exercise and every session that uses it starts the countdown there.
+      </p>
+
+      <div className="bg-panel border border-line rounded-2xl p-4 mb-5">
+        <Field placeholder="e.g. Yellow Lever Chest Press" value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') add(); }} />
+        <div className="flex items-center gap-2 mt-3">
+          <Seg value={type} onChange={setType} options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
+          <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+            <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
+            <input inputMode="numeric" placeholder={String(state.settings.defaultRest)} value={rest}
+              onChange={e => setRestField(e.target.value)} aria-label="Default rest in seconds"
+              className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
+            <span className="text-[11px] text-muted">s</span>
+          </label>
+          <Btn tone="primary" onClick={add} className="px-6 ml-auto">Add</Btn>
+        </div>
+      </div>
+
+      <div className="mb-3">
+        <Seg value={filter} onChange={setFilter} options={[
+          { v: 'all', label: 'All' }, { v: 'fav', label: '★ Favourites' },
+          { v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }
+        ]} />
+      </div>
+
+      <div className="space-y-1.5">
+        {shown.map(e => (
+          <div key={e.id} className="bg-panel border border-line rounded-xl px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <button onClick={() => toggleFav(e.id)} aria-label={`Favourite ${e.name}`}
+                className={`text-lg px-1 ${e.isFavorite ? 'text-amber' : 'text-line'}`}>★</button>
+              <span className="text-[14px] truncate flex-1">{e.name}</span>
+              <button onClick={() => setState(p => ({ ...p, exercises: p.exercises.filter(x => x.id !== e.id) }))}
+                className="text-muted text-xl leading-none px-1" aria-label={`Delete ${e.name}`}>×</button>
+            </div>
+            <div className="flex items-center gap-2 mt-2 pl-1">
+              <Seg value={e.type || 'reps'} onChange={t => setType2(e.id, t)}
+                options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
+              <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+                <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
+                <input inputMode="numeric" placeholder={String(state.settings.defaultRest)}
+                  value={e.defaultRestSec == null ? '' : e.defaultRestSec}
+                  onChange={ev => setRest(e.id, ev.target.value)}
+                  aria-label={`Default rest for ${e.name} in seconds`}
+                  className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
+                <span className="text-[11px] text-muted">s</span>
+              </label>
+              {e.defaultRestSec == null && <span className="text-[10px] text-muted">using global</span>}
+            </div>
+          </div>
+        ))}
+        {shown.length === 0 && <p className="text-muted text-sm">Nothing matches that filter.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+   History
+   ──────────────────────────────────────────────────────────────── */
+function SessionCard({ w }) {
+  return (
+    <div className="bg-panel border border-line rounded-2xl p-4">
+      <div className="flex justify-between items-baseline gap-3">
+        <span className="font-semibold truncate">{w.workout}</span>
+        <span className="num text-[11px] text-muted">{w.date}</span>
+      </div>
+      <div className="num text-[12px] text-muted mt-1">
+        {(w.totalVolumeKg || 0).toLocaleString()} kg
+        {w.totalTimeSec > 0 && <> · {dur(w.totalTimeSec)}</>}
+        {' '}· {w.exercises.length} exercises · {w.durationMin} min
+      </div>
+    </div>
+  );
+}
+
+function HistoryView({ state, say }) {
+  const [openId, setOpenId] = useState(null);
+
+  const week = useMemo(() => {
+    const cutoff = Date.now() - 7 * 864e5;
+    const ws = state.history.filter(w => (w.finishedAt || 0) > cutoff);
+    return { volume: ws.reduce((a, w) => a + (w.totalVolumeKg || 0), 0), count: ws.length };
+  }, [state.history]);
+
+  const exportAll = () => {
+    copyText(JSON.stringify({ app: 'IronDesk', version: 2, exportedAt: new Date().toISOString(), workouts: state.history }, null, 2))
+      .then(() => say('Full history copied. Paste it to Claude for your weekly sync.'));
+  };
+
+  if (state.history.length === 0) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-1">History</h1>
+        <p className="text-muted text-sm">Finish a workout and it lands here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-1">History</h1>
+      <p className="text-muted text-sm mb-5 num">
+        Last 7 days: {Math.round(week.volume).toLocaleString()} kg across {week.count} sessions
+      </p>
+
+      <div className="space-y-3">
+        {state.history.map(w => (
+          <div key={w.id}>
+            <button onClick={() => setOpenId(openId === w.id ? null : w.id)} className="w-full text-left">
+              <SessionCard w={w} />
+            </button>
+            {openId === w.id && (
+              <div className="bg-raise border border-line border-t-0 rounded-b-2xl -mt-1 p-4 space-y-2">
+                {w.exercises.map((e, i) => (
+                  <div key={i} className="text-[13px]">
+                    <div className="flex justify-between gap-3">
+                      <span className="truncate">{e.name}</span>
+                      <span className="num text-muted whitespace-nowrap">
+                        {(e.type || 'reps') === 'time' ? dur(e.timeSec || 0) : `${(e.volumeKg || 0).toLocaleString()} kg`}
+                      </span>
+                    </div>
+                    <div className="num text-[11px] text-muted mt-0.5">
+                      {e.sets.map(st => (e.type === 'time'
+                        ? `${st.weightKg ? st.weightKg + 'kg ' : ''}${st.durationSec}s`
+                        : `${st.weightKg}×${st.reps}`)).join('  ·  ')}
+                    </div>
+                  </div>
+                ))}
+                <button onClick={() => copyText(JSON.stringify(w, null, 2)).then(() => say('Session JSON copied'))}
+                  className="w-full mt-2 text-[13px] text-amber border border-amber/40 rounded-lg py-2.5">
+                  Copy this session as JSON
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <Btn className="w-full mt-5" onClick={exportAll}>Copy full history JSON</Btn>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Settings
+   ──────────────────────────────────────────────────────────────── */
+function SettingsView({ state, setState, say }) {
+  const s = state.settings;
+  const set = (k, v) => setState(p => ({ ...p, settings: { ...p.settings, [k]: v } }));
+
+  const testHook = async () => {
+    const url = s.webhookUrl.trim();
+    if (!url) { say('Paste your Apps Script URL first.'); return; }
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ rows: [[today(), 'Connection test', '—', 'reps', 0, 0, 0, '', '', 0, 'sent from Iron Desk']] })
+      });
+      say('Test row sent. Check your sheet.');
+    } catch (e) {
+      say("Couldn't reach the script. Check the URL is the /exec one.");
+    }
+  };
+
+  const Toggle = ({ label, hint, k }) => (
+    <button onClick={() => set(k, !s[k])}
+      className="w-full flex items-center justify-between bg-panel border border-line rounded-xl px-4 py-3.5 text-left">
+      <span>
+        <span className="block text-[14px]">{label}</span>
+        {hint && <span className="block text-[11px] text-muted mt-0.5">{hint}</span>}
+      </span>
+      <span className={`w-12 h-7 rounded-full p-1 shrink-0 ml-3 ${s[k] ? 'bg-amber' : 'bg-line'}`}>
+        <span className={`block w-5 h-5 rounded-full bg-ink transition-transform ${s[k] ? 'translate-x-5' : ''}`} />
+      </span>
+    </button>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold mb-1">Settings</h1>
+        <p className="text-muted text-sm">{storageLabel}.</p>
+      </div>
+
+      <div>
+        <h2 className="text-[11px] uppercase tracking-[0.14em] text-muted mb-3">Google Sheet</h2>
+        <Field label="Apps Script web app URL" placeholder="https://script.google.com/macros/s/…/exec"
+          value={s.webhookUrl} onChange={e => set('webhookUrl', e.target.value)} />
+        <p className="text-[11px] text-muted mt-2 leading-relaxed">
+          Deploy the script as a web app with access set to Anyone, then paste the /exec URL here.
+          The sheet now carries type and duration columns — if you set this up before, copy the
+          script again and redeploy.
+        </p>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <Btn onClick={testHook}>Send a test row</Btn>
+          <Btn onClick={() => copyText(APPS_SCRIPT).then(() => say('Apps Script copied'))}>Copy the script</Btn>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <h2 className="text-[11px] uppercase tracking-[0.14em] text-muted mb-3">Rest timer</h2>
+        <Toggle k="sound" label="Chime when rest ends" />
+        <Toggle k="vibrate" label="Vibrate when rest ends" hint="Android and some browsers only" />
+        <Toggle k="autoSync" label="Send to sheet on finish" />
+        <Field label="Fallback rest (seconds)" inputMode="numeric" value={s.defaultRest}
+          onChange={e => set('defaultRest', num(e.target.value))} />
+        <p className="text-[11px] text-muted leading-relaxed">
+          Only used for exercises with no rest time of their own. Set those per exercise
+          on the Exercises screen.
+        </p>
+        <Btn className="w-full" onClick={() => { beep(3); buzz([220, 90, 220]); }}>Test the alert</Btn>
+      </div>
+
+      <div className="space-y-2">
+        <h2 className="text-[11px] uppercase tracking-[0.14em] text-muted mb-3">Data</h2>
+        <Btn className="w-full" onClick={() => copyText(JSON.stringify(state, null, 2)).then(() => say('Backup copied'))}>
+          Copy a full backup
+        </Btn>
+        <Btn className="w-full" onClick={() => {
+          const t = ask('Paste a backup JSON');
+          if (!t) return;
+          try {
+            const d = JSON.parse(t);
+            if (!d.exercises || !d.templates) throw new Error('shape');
+            setState(migrate(d));
+            say('Backup restored');
+          } catch (e) { say("That doesn't look like an Iron Desk backup."); }
+        }}>Restore from a backup</Btn>
+        <Btn tone="danger" className="w-full" onClick={() => {
+          if (sure('Erase all workouts, routines and custom exercises?')) { setState(DEFAULT_STATE); say('Everything reset'); }
+        }}>Reset everything</Btn>
+      </div>
+    </div>
+  );
+}
+
+const APPS_SCRIPT = `const SHEET_NAME = 'Workouts';
+const HEADERS = ['date','workout','exercise','type','set','weight_kg','reps','duration_s','rpe','volume_kg','notes'];
+
+function doPost(e) {
+  try {
+    const body = JSON.parse(e.postData.contents);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(SHEET_NAME);
+      sheet.appendRow(HEADERS);
+      sheet.getRange(1, 1, 1, HEADERS.length).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+    }
+    const rows = body.rows || [];
+    if (!rows.length) return json({ ok: false, error: 'No rows in request' });
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    return json({ ok: true, appended: rows.length });
+  } catch (err) {
+    return json({ ok: false, error: String(err) });
+  }
+}
+
+function doGet() { return json({ ok: true, message: 'Workout webhook is live' }); }
+
+function json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}`;
+
+/* ── Mount ───────────────────────────────────────────────────── */
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+// Offline support, if an sw.js is hosted alongside this file.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
