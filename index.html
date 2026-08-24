@@ -9,20 +9,18 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="IronDesk" />
   <title>Iron Desk — Gym Log</title>
-
   <!-- Embedded SVG Favicon & iOS App Icon -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='100' fill='%230A0C0E'/><path fill='%23FFB020' d='M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z'/></svg>" />
   <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='100' fill='%230A0C0E'/><path fill='%23FFB020' d='M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z'/></svg>" />
-
-  <!-- Validated Inline Web App Manifest -->
-  <link rel="manifest" href='data:application/manifest+json,{"name":"Iron Desk Logger","short_name":"IronDesk","start_url":".","display":"standalone","background_color":"#0A0C0E","theme_color":"#0A0C0E","icons":[{"src":"data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\"><rect width=\"512\" height=\"512\" rx=\"100\" fill=\"%230A0C0E\"/><path fill=\"%23FFB020\" d=\"M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z\"/></svg>","sizes":"512x512","type":"image/svg+xml","purpose":"any maskable"}]}' />
-
+  <!-- Inline Web App Manifest.
+       Colours MUST be %23, not a bare #: a raw hash starts the URL fragment and
+       the browser only ever receives the JSON up to that point. -->
+  <link rel="manifest" href='data:application/manifest+json,{"name":"Iron Desk Logger","short_name":"IronDesk","start_url":".","display":"standalone","background_color":"%230A0C0E","theme_color":"%230A0C0E","icons":[{"src":"data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\"><rect width=\"512\" height=\"512\" rx=\"100\" fill=\"%230A0C0E\"/><path fill=\"%23FFB020\" d=\"M100 230h60v52h-60zm252 0h60v52h-60zM140 210h30v92h-30zm202 0h30v92h-30zM190 240h132v32H190z\"/></svg>","sizes":"512x512","type":"image/svg+xml","purpose":"any maskable"}]}' />
   <!-- External Libraries -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-
   <script>
     tailwind.config = {
       theme: {
@@ -42,7 +40,6 @@
       }
     }
   </script>
-
   <style>
     html, body, #root { height: 100%; background: #0A0C0E; }
     body {
@@ -63,8 +60,24 @@
     @keyframes pulseRing { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
     .ring-live { animation: pulseRing 1.6s ease-in-out infinite; }
     @media (prefers-reduced-motion: reduce) { .ring-live { animation: none; opacity: .7 } }
+
+    /* Set table: scrolls sideways only when the screen genuinely can't fit it,
+       with the set number pinned so you never lose your place. */
+    .set-scroll { overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+    .set-grid {
+      display: grid;
+      grid-template-columns: 26px minmax(58px, 1fr) minmax(58px, 1fr) 44px 48px;
+      gap: 6px;
+      min-width: 268px;
+      align-items: center;
+    }
+    .set-pin { position: sticky; left: 0; z-index: 2; background: #14181C; }
+    .set-scroll.is-scrollable .set-pin::after {
+      content: ''; position: absolute; top: 0; right: -8px; bottom: 0; width: 8px;
+      background: linear-gradient(to right, rgba(20,24,28,.9), transparent);
+    }
   </style>
-</head>
+</head></head>
 <body>
 <div id="root"></div>
 
@@ -131,6 +144,8 @@ function addExerciseTo(list, name, opts = {}) {
     name: clean,
     type: opts.type === 'time' ? 'time' : 'reps',
     defaultRestSec: opts.defaultRestSec != null ? Number(opts.defaultRestSec) : null,
+    note: String(opts.note || '').trim(),
+    group: opts.group || 'Other',
     isFavorite: !!opts.isFavorite,
     custom: opts.custom !== false
   };
@@ -158,6 +173,70 @@ function copyText(text) {
   ta.select();
   try { document.execCommand('copy'); } finally { document.body.removeChild(ta); }
   return Promise.resolve();
+}
+
+/* ── Webhook transport ───────────────────────────────────────── */
+
+/* The Library tab's column order. Kept in one place so the app, the
+   Apps Script and the sheet header can't drift apart.
+   note carries the form cue; without it a restore gives you back a list
+   of bare names rather than a usable library. */
+const LIBRARY_COLUMNS = ['name', 'type', 'defaultRestSec', 'isFavorite', 'note', 'group'];
+
+const libraryRows = exercises => exercises.map(e => [
+  e.name,
+  e.type || 'reps',
+  e.defaultRestSec == null ? '' : e.defaultRestSec,
+  !!e.isFavorite,
+  e.note || '',
+  e.group || 'Other'
+]);
+
+/* Maps the library into 2D rows and posts them to the webhook. Resolves
+   with the script's reply where the browser lets us read it. */
+function syncLibraryToSheet(state) {
+  const url = (state.settings.webhookUrl || '').trim();
+  if (!url) return Promise.reject(new Error('No webhook URL set'));
+  return postWebhook(url, { action: 'syncLibrary', library: libraryRows(state.exercises) });
+}
+
+function postWebhook(url, payload) {
+  // text/plain keeps this a "simple" request, so the browser skips the
+  // preflight that Apps Script can't answer.
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(payload)
+  });
+}
+
+/* Reading back is the awkward direction: Apps Script bounces /exec through
+   a redirect that often strips CORS. Try a normal fetch, fall back to a
+   JSONP script tag, which sidesteps CORS entirely. */
+function jsonp(url, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const cb = 'irondesk_' + Math.random().toString(36).slice(2, 9);
+    const tag = document.createElement('script');
+    let settled = false;
+    const cleanup = () => {
+      try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+      if (tag.parentNode) tag.parentNode.removeChild(tag);
+    };
+    window[cb] = data => { settled = true; cleanup(); resolve(data); };
+    tag.onerror = () => { if (!settled) { cleanup(); reject(new Error('Script failed to load')); } };
+    tag.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'callback=' + cb;
+    document.body.appendChild(tag);
+    setTimeout(() => { if (!settled) { cleanup(); reject(new Error('Timed out')); } }, timeoutMs);
+  });
+}
+
+async function fetchLibrary(url) {
+  const target = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'action=library';
+  try {
+    const r = await fetch(target);
+    if (r.ok) return await r.json();
+  } catch (e) { /* fall through to JSONP */ }
+  return jsonp(target);
 }
 
 /* ── Audio: a short two-tone chime, built on the fly ──────────── */
@@ -190,89 +269,274 @@ function buzz(pattern) {
   try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
 }
 
-/* ── Seed data: the four training days ───────────────────────── */
+/* ────────────────────────────────────────────────────────────────
+   Exercise catalogue — the single source of truth.
+
+   Every movement carries its own tracking mode, rest time, form cue and
+   group. Routines below reference movements by name only, so editing a
+   cue or a rest time here updates every routine that uses it.
+   r = default rest in seconds. Yoga and stretches use short rests
+   because they're a flow, not a working set.
+   ──────────────────────────────────────────────────────────────── */
+const CATALOGUE = [
+  { group: 'Warm-up', items: [
+    { n: 'Treadmill Incline Walk',   t: 'time', r: 60, note: '5 min at 8–10% incline. You should still be able to hold a sentence' },
+    { n: 'Stationary Bike',          t: 'time', r: 60, note: 'Easy spin, RPE 3–4. Saddle height so the knee stays slightly bent at the bottom' },
+    { n: 'Rowing Machine',           t: 'time', r: 60, note: 'Legs, then back, then arms. Reverse that on the return' },
+    { n: 'Jump Rope',                t: 'time', r: 45, note: 'Land on the balls of the feet, knees soft. Stop if the calves get tight' },
+    { n: 'Arm Circles',              t: 'time', r: 20, note: 'Small to large. Shoulders stay down, away from the ears' },
+    { n: 'Leg Swings — Front to Back', t: 'time', r: 20, note: 'Hold the rack. Pelvis stays still — the swing comes from the hip, not the spine' },
+    { n: 'Leg Swings — Side to Side',  t: 'time', r: 20, note: 'Torso upright, don’t let the ribs flare to reach height' },
+    { n: 'Band Pull-Apart',          t: 'reps', r: 30, note: 'Straight arms, squeeze the mid-back. No shrug' },
+    { n: 'Band Shoulder Dislocate',  t: 'reps', r: 30, note: 'Wide grip, slow. Go only as narrow as stays painless' },
+    { n: 'Scapular Pull-Up',         t: 'reps', r: 45, note: 'Arms stay straight. Only the shoulder blades move — this wakes up the lats' },
+    { n: 'Cat-Cow',                  t: 'reps', r: 20, note: 'Move one vertebra at a time. Breathe out as you round' },
+    { n: 'Bird Dog',                 t: 'reps', r: 30, note: 'Opposite arm and leg. A glass of water on your lower back shouldn’t spill' },
+    { n: 'Glute Bridge',             t: 'reps', r: 45, note: 'Ribs down, squeeze at the top. Height comes from the glutes, not a lumbar arch' },
+    { n: '90/90 Hip Switch',         t: 'reps', r: 30, note: 'Sit tall, rotate both knees to the floor. Chest stays lifted' },
+    { n: 'Ankle Rocks',              t: 'reps', r: 20, note: 'Knee tracks over the second toe. Heel stays glued to the floor' },
+    { n: 'World’s Greatest Stretch', t: 'time', r: 20, note: 'Lunge, elbow to instep, then rotate up. Best single warm-up for leg day' },
+    { n: 'Bodyweight Squat',         t: 'reps', r: 45, note: 'Rehearse the pattern you’re about to load. Same depth, same foot position' },
+  ]},
+
+  { group: 'Push', items: [
+    { n: 'Barbell Bench Press',      t: 'reps', r: 180, note: 'Blades pinned back and down, feet planted. Bar to the lower chest, elbows ~45°' },
+    { n: 'Incline Barbell Press',    t: 'reps', r: 180, note: 'Bench at 30°. Higher than that turns it into a shoulder press' },
+    { n: 'Close-Grip Bench Press',   t: 'reps', r: 150, note: 'Hands shoulder-width, elbows tucked. Wrists stacked over the elbows' },
+    { n: 'Incline Dumbbell Press',   t: 'reps', r: 150, note: 'Elbows 45°, blades pinned. Stop when the upper arm is level with the torso' },
+    { n: 'Flat Dumbbell Press',      t: 'reps', r: 150, note: 'Dumbbells travel in an arc, not straight out. Don’t clang them at the top' },
+    { n: 'Machine Chest Press',      t: 'reps', r: 120, note: 'Handles at mid-chest height. Squeeze 1s at the top' },
+    { n: 'Smith Incline Press',      t: 'reps', r: 120, note: 'Fixed path, so set your bench position before you load it' },
+    { n: 'Cable Chest Fly',          t: 'reps', r: 90,  note: 'Constant slight elbow bend. Think of hugging a barrel' },
+    { n: 'Pec Deck',                 t: 'reps', r: 90,  note: 'Seat height so the handles sit at chest level. Stop before the shoulders roll forward' },
+    { n: 'Push-Up',                  t: 'reps', r: 90,  note: 'Ribs down, glutes squeezed. A straight line from ear to ankle' },
+    { n: 'Assisted Dip',             t: 'reps', r: 120, note: 'Slight forward lean for chest, upright for triceps. Don’t drop below a painful shoulder stretch' },
+    { n: 'Overhead Press (Barbell)', t: 'reps', r: 180, note: 'Glutes and abs braced, ribs down. Chin back, then push the head through at the top' },
+    { n: 'Seated Machine Shoulder Press', t: 'reps', r: 120, note: 'Back on the pad, ribs down. Stop at ear level on the way down' },
+    { n: 'Seated Dumbbell Shoulder Press', t: 'reps', r: 120, note: 'Ribs down, stop at ears. Press up and slightly in' },
+    { n: 'Arnold Press',             t: 'reps', r: 120, note: 'Rotate as you press. Go light — the rotation under load is the hard part' },
+    { n: 'Landmine Press',           t: 'reps', r: 120, note: 'The 45° path most cranky shoulders tolerate. Neutral grip, ribs down' },
+    { n: 'Dumbbell Lateral Raise',   t: 'reps', r: 60,  note: 'Light and strict. Lead with the elbow, stop at shoulder height' },
+    { n: 'Cable Lateral Raise',      t: 'reps', r: 75,  note: 'Lead with elbow, no swing. Constant tension through the bottom' },
+    { n: 'Machine Lateral Raise',    t: 'reps', r: 60,  note: 'Pad against the outer arm, not the forearm. Pause at the top' },
+    { n: 'Overhead Cable Triceps Ext', t: 'reps', r: 75, note: 'Elbows forward and still. Only the forearm moves' },
+    { n: 'Triceps Pushdown',         t: 'reps', r: 60,  note: 'Elbows glued to the ribs. Full lockout, controlled return' },
+    { n: 'Skull Crusher',            t: 'reps', r: 90,  note: 'Lower behind the forehead, not to it. Stop if the elbows ache' },
+  ]},
+
+  { group: 'Pull', items: [
+    { n: 'Trap-Bar Deadlift',        t: 'reps', r: 180, note: 'Handles beside you means far less spinal shear. Slack out, push the floor away' },
+    { n: 'Conventional Deadlift',    t: 'reps', r: 180, note: 'Bar over mid-foot, oranges in the armpits, slack out. Full reset every rep' },
+    { n: 'Romanian Deadlift',        t: 'reps', r: 150, note: 'Soft knees locked at one angle. Hips to the back wall, stop at the hamstring stretch' },
+    { n: 'Dumbbell RDL',             t: 'reps', r: 120, note: 'Easier to bail than a barbell. Dumbbells shave the thighs on the way down' },
+    { n: 'Lat Pulldown',             t: 'reps', r: 120, note: 'Elbows down and back into your back pockets. Lean back no more than 20°' },
+    { n: 'Neutral-Grip Pulldown',    t: 'reps', r: 120, note: 'Palms facing. The friendliest grip if the shoulders complain' },
+    { n: 'Assisted Pull-Up',         t: 'reps', r: 120, note: '3s negative, no kipping. Chest toward the bar line' },
+    { n: 'Chin-Up',                  t: 'reps', r: 150, note: 'Supinated grip, more biceps. Ribs down at the top — don’t arch to finish' },
+    { n: 'Chest-Supported Row',      t: 'reps', r: 120, note: 'Chest never leaves the pad — that pad is the safety mechanism' },
+    { n: 'Seated Cable Row',         t: 'reps', r: 90,  note: 'Torso vertical, no rocking. Let the blades protract fully at the front' },
+    { n: 'Single-Arm Cable Row',     t: 'reps', r: 90,  note: 'Let the blade travel forward at the stretch. Torso doesn’t rotate' },
+    { n: 'Dumbbell Row',             t: 'reps', r: 90,  note: 'Hand and knee on the bench. Pull to the hip, not the shoulder' },
+    { n: 'T-Bar Row',                t: 'reps', r: 150, note: 'Use the chest-supported version if your lower back is the limiter' },
+    { n: 'Machine High Row',         t: 'reps', r: 90,  note: 'Pull down and back. Great lat isolation with zero lower-back cost' },
+    { n: 'Straight-Arm Pulldown',    t: 'reps', r: 75,  note: 'Arms stay long. Pure lat work, no biceps' },
+    { n: 'Face Pull',                t: 'reps', r: 60,  note: 'To the forehead, elbows high, rotate out at the end. Shoulder-health insurance' },
+    { n: 'Reverse Pec Deck',         t: 'reps', r: 60,  note: 'Thumbs down, lead with the elbows, no shrug' },
+    { n: 'Barbell Shrug',            t: 'reps', r: 90,  note: 'Straight up, no rolling. Pause 1s at the top' },
+    { n: 'EZ-Bar Curl',              t: 'reps', r: 60,  note: 'Elbows still, no hip drive' },
+    { n: 'Incline Dumbbell Curl',    t: 'reps', r: 75,  note: 'Upper arm stays behind the torso — that’s what makes it a stretch position' },
+    { n: 'Cable Hammer Curl',        t: 'reps', r: 60,  note: 'Neutral wrist, elbows pinned' },
+    { n: 'Preacher Curl',            t: 'reps', r: 75,  note: 'Armpits on the pad. Don’t snap into full extension at the bottom' },
+    { n: 'Dead Hang',                t: 'time', r: 60,  note: 'Shoulders active, not slumped. Decompresses the spine after pulling' },
+  ]},
+
+  { group: 'Legs', items: [
+    { n: 'Barbell Back Squat',       t: 'reps', r: 180, note: 'Ribs down, brace, tripod foot. Stop the descent the instant the pelvis tucks' },
+    { n: 'Hack Squat',               t: 'reps', r: 180, note: 'Back pad supports the spine. Same tripod foot, same stop-at-the-tuck rule' },
+    { n: 'Goblet Squat',             t: 'reps', r: 120, note: 'Front load keeps the torso upright for you. Elbows inside the knees' },
+    { n: 'Front Squat',              t: 'reps', r: 180, note: 'Elbows high throughout. The moment they drop, the bar rolls — rack it' },
+    { n: 'Leg Press',                t: 'reps', r: 150, note: 'Lower back flat on the pad. Stop lowering the instant the pelvis lifts off' },
+    { n: 'Bulgarian Split Squat',    t: 'reps', r: 90,  note: 'Front shin near vertical, back knee travels down. Weak leg goes first' },
+    { n: 'Walking Lunge',            t: 'reps', r: 90,  note: 'Step long for glutes, short for quads. Torso upright' },
+    { n: 'Step-Up',                  t: 'reps', r: 90,  note: 'Drive through the top foot. Don’t push off the trailing toe' },
+    { n: 'Leg Extension',            t: 'reps', r: 75,  note: 'Squeeze 1s at the top. Reduce range if the kneecap complains' },
+    { n: 'Seated Leg Curl',          t: 'reps', r: 90,  note: 'Hips strapped down. 3s controlled return' },
+    { n: 'Lying Leg Curl',           t: 'reps', r: 90,  note: 'Hips stay on the pad — lifting them is the cheat to watch for' },
+    { n: 'Hip Thrust',               t: 'reps', r: 150, note: 'Chin tucked, ribs down. Finish with the torso parallel to the floor, no arching past it' },
+    { n: 'Cable Pull-Through',       t: 'reps', r: 90,  note: 'Teaches the hinge with the load pulling you backwards, so falling forward is impossible' },
+    { n: '45° Back Extension',       t: 'reps', r: 75,  note: 'Extend to a straight line and stop. No hyperextension — squeeze the glutes' },
+    { n: 'Standing Calf Raise',      t: 'reps', r: 60,  note: '2s stretch at the bottom, 1s squeeze at the top' },
+    { n: 'Seated Calf Raise',        t: 'reps', r: 60,  note: 'Full stretch, 1s squeeze. Hits the soleus, so keep the reps high' },
+    { n: 'Adductor Machine',         t: 'reps', r: 60,  note: 'Ease into the stretch. This one gets strained by rushing' },
+    { n: 'Abductor Machine',         t: 'reps', r: 60,  note: 'Slight forward lean biases the glute medius' },
+    { n: 'Wall Sit',                 t: 'time', r: 60,  note: 'Thighs parallel, back flat to the wall. Breathe — don’t hold your breath' },
+  ]},
+
+  { group: 'Core', items: [
+    { n: 'Plank',                    t: 'time', r: 45, note: 'Glutes squeezed, ribs down, straight line ear to ankle' },
+    { n: 'Side Plank',               t: 'time', r: 45, note: 'Stack the hips. Push the floor away from the bottom shoulder' },
+    { n: 'Hollow Body Hold',         t: 'time', r: 60, note: 'Lower back pressed into the floor. Lower the legs only as far as that stays true' },
+    { n: 'Cable Crunch',             t: 'reps', r: 60, note: 'Ribs to pelvis — this is spinal flexion, not a hip hinge. Exhale hard at the bottom' },
+    { n: 'Hanging Knee Raise',       t: 'reps', r: 75, note: 'Curl the pelvis up at the top. Stop swinging before the next rep' },
+    { n: 'Dead Bug',                 t: 'reps', r: 45, note: 'Lower back stays pinned. Slow, opposite arm and leg' },
+    { n: 'Pallof Press',             t: 'reps', r: 45, note: 'Resist the rotation — that’s the whole exercise. Ribs down' },
+    { n: 'Ab Wheel Rollout',         t: 'reps', r: 90, note: 'From the knees. Stop the moment the lower back starts to arch' },
+    { n: 'Farmer’s Carry',           t: 'time', r: 90, note: 'Tall posture, shoulders back. Don’t lean away from the load' },
+    { n: 'Suitcase Carry',           t: 'time', r: 90, note: 'One side only. Stay perfectly upright — the anti-lean is the point' },
+  ]},
+
+  { group: 'Yoga', items: [
+    { n: 'Downward Dog',             t: 'time', r: 20, note: 'Hips high, knees can bend. Long spine matters more than straight legs' },
+    { n: 'Child’s Pose',             t: 'time', r: 20, note: 'Knees wide, hips to heels, arms long. Breathe into the back of the ribs' },
+    { n: 'Cobra',                    t: 'time', r: 20, note: 'Elbows soft, shoulders down. Lengthen forward — don’t crank the lower back' },
+    { n: 'Low Lunge (Anjaneyasana)', t: 'time', r: 20, note: 'Back knee down, tuck the tailbone. You should feel the front of the back hip' },
+    { n: 'Pigeon Pose',              t: 'time', r: 20, note: 'Front shin angled, hips square. Prop the hip on a block if it hovers' },
+    { n: 'Warrior II',               t: 'time', r: 20, note: 'Front knee over the ankle, torso stacked over the hips. Relax the shoulders' },
+    { n: 'Triangle Pose',            t: 'time', r: 20, note: 'Hinge sideways from the hip, not the waist. Chest open to the side wall' },
+    { n: 'Chair Pose',               t: 'time', r: 30, note: 'Weight in the heels, ribs down. Legs burn, lower back stays quiet' },
+    { n: 'Bridge Pose',              t: 'time', r: 20, note: 'Feet hip-width, press through the heels. Glutes lift you, not the spine' },
+    { n: 'Seated Forward Fold',      t: 'time', r: 20, note: 'Hinge from the hips with a long spine. Bend the knees rather than round the back' },
+    { n: 'Supine Twist',             t: 'time', r: 20, note: 'Both shoulders stay down. Let gravity do it — never force the knee lower' },
+    { n: 'Thread the Needle',        t: 'time', r: 20, note: 'Opens the mid-back. Sink the shoulder toward the mat, breathe wide' },
+    { n: 'Happy Baby',               t: 'time', r: 20, note: 'Hold the outside edges of the feet, shins vertical. Lower back stays on the mat' },
+    { n: 'Legs Up the Wall',         t: 'time', r: 20, note: 'Best 5 minutes after a leg session. Nothing to achieve — just breathe' },
+    { n: 'Tree Pose',                t: 'time', r: 20, note: 'Foot above or below the knee, never on it. Fix your eyes on one spot' },
+    { n: 'Corpse Pose (Savasana)',   t: 'time', r: 20, note: 'Flat on your back, palms up. Two minutes minimum to be worth anything' },
+  ]},
+
+  { group: 'Stretch', items: [
+    { n: 'Couch Stretch',            t: 'time', r: 20, note: 'Back foot up on a bench, tailbone tucked. The best hip flexor stretch there is' },
+    { n: 'Standing Hamstring Stretch', t: 'time', r: 20, note: 'Heel on a low box, hinge from the hip with a flat back' },
+    { n: 'Doorway Pec Stretch',      t: 'time', r: 20, note: 'Forearm on the frame, elbow at shoulder height. Rotate away, don’t lunge through' },
+    { n: 'Lat Stretch on Rack',      t: 'time', r: 20, note: 'Hands on the rack, hips back, chest sinks. Breathe into the armpit' },
+    { n: '90/90 Hip Stretch',        t: 'time', r: 20, note: 'Sit tall first, then lean over the front shin. Chest leads' },
+    { n: 'Seated Figure-4',          t: 'time', r: 20, note: 'Ankle over the opposite knee, hinge forward. Targets the glute' },
+    { n: 'Calf Stretch on Step',     t: 'time', r: 20, note: 'Straight knee for the gastroc, bent knee for the soleus. Do both' },
+    { n: 'Quad Stretch',             t: 'time', r: 20, note: 'Tuck the tailbone before you pull the heel in, or you just arch the back' },
+    { n: 'Wrist Flexor Stretch',     t: 'time', r: 20, note: 'Worth doing after any heavy pulling day' },
+    { n: 'Neck Side Bend',           t: 'time', r: 20, note: 'Gentle. Let the head fall — never pull hard on your own neck' },
+  ]},
+];
+
+/* Routines reference movements by name. Type, rest and form cue all come
+   from the catalogue above, so nothing is duplicated or can drift. */
 const SEED_TEMPLATES = [
   { id: 'tpl-push', name: 'Mon · Push', items: [
-    { name: 'Incline Dumbbell Press',        sets: 4, repRange: '6-10',  restSec: 150, note: 'Elbows 45°, blades pinned' },
-    { name: 'Machine Chest Press',           sets: 3, repRange: '10-12', restSec: 120, note: 'Squeeze 1s at top' },
-    { name: 'Seated Dumbbell Shoulder Press',sets: 3, repRange: '8-12',  restSec: 120, note: 'Ribs down, stop at ears' },
-    { name: 'Cable Lateral Raise',           sets: 3, repRange: '12-15', restSec: 75,  note: 'Lead with elbow, no swing' },
-    { name: 'Overhead Cable Triceps Ext',    sets: 3, repRange: '10-15', restSec: 75,  note: 'Elbows forward and still' },
-    { name: 'Triceps Pushdown',              sets: 2, repRange: '12-15', restSec: 60,  note: 'Elbows glued to ribs' },
-    { name: 'Standing Calf Raise',           sets: 3, repRange: '12-20', restSec: 60,  note: '2s stretch at bottom' }
+    { name: 'Incline Dumbbell Press',        sets: 4, repRange: '6-10' },
+    { name: 'Machine Chest Press',           sets: 3, repRange: '10-12' },
+    { name: 'Seated Dumbbell Shoulder Press',sets: 3, repRange: '8-12' },
+    { name: 'Cable Lateral Raise',           sets: 3, repRange: '12-15' },
+    { name: 'Overhead Cable Triceps Ext',    sets: 3, repRange: '10-15' },
+    { name: 'Triceps Pushdown',              sets: 2, repRange: '12-15' },
+    { name: 'Standing Calf Raise',           sets: 3, repRange: '12-20' }
   ]},
   { id: 'tpl-pull', name: 'Tue · Pull', items: [
-    { name: 'Trap-Bar Deadlift',   sets: 3, repRange: '5-8',   restSec: 180, note: 'Slack out, push the floor away' },
-    { name: 'Lat Pulldown',        sets: 3, repRange: '8-12',  restSec: 120, note: 'Elbows down and back' },
-    { name: 'Chest-Supported Row', sets: 3, repRange: '10-12', restSec: 120, note: 'Chest never leaves the pad' },
-    { name: 'Seated Cable Row',    sets: 3, repRange: '10-15', restSec: 90,  note: 'Torso vertical, no rocking' },
-    { name: 'Face Pull',           sets: 3, repRange: '15-20', restSec: 60,  note: 'To forehead, elbows high' },
-    { name: 'Incline Dumbbell Curl', sets: 3, repRange: '8-12', restSec: 75, note: 'Upper arm stays behind torso' },
-    { name: 'Cable Hammer Curl',   sets: 2, repRange: '12-15', restSec: 60,  note: 'Neutral wrist, elbows pinned' },
-    { name: 'Dead Hang', type: 'time', sets: 2, targetSec: 45, restSec: 60,  note: 'Shoulders active, not slumped' }
+    { name: 'Trap-Bar Deadlift',   sets: 3, repRange: '5-8' },
+    { name: 'Lat Pulldown',        sets: 3, repRange: '8-12' },
+    { name: 'Chest-Supported Row', sets: 3, repRange: '10-12' },
+    { name: 'Seated Cable Row',    sets: 3, repRange: '10-15' },
+    { name: 'Face Pull',           sets: 3, repRange: '15-20' },
+    { name: 'Incline Dumbbell Curl', sets: 3, repRange: '8-12' },
+    { name: 'Cable Hammer Curl',   sets: 2, repRange: '12-15' },
+    { name: 'Dead Hang',           sets: 2, targetSec: 45 }
   ]},
   { id: 'tpl-legs', name: 'Thu · Legs', items: [
-    { name: 'Hack Squat',              sets: 4, repRange: '6-10',  restSec: 180, note: 'Stop when the pelvis tucks' },
-    { name: 'Leg Press',               sets: 3, repRange: '10-15', restSec: 150, note: 'Lower back flat on the pad' },
-    { name: 'Seated Leg Curl',         sets: 4, repRange: '10-15', restSec: 90,  note: '3s controlled return' },
-    { name: 'Bulgarian Split Squat',   sets: 3, repRange: '8-12',  restSec: 90,  note: 'Front shin vertical, weak leg first' },
-    { name: '45° Back Extension',      sets: 3, repRange: '12-15', restSec: 75,  note: 'Straight line, no hyperextension' },
-    { name: 'Seated Calf Raise',       sets: 3, repRange: '15-20', restSec: 60,  note: 'Full stretch, 1s squeeze' },
-    { name: 'Cable Crunch',            sets: 3, repRange: '12-15', restSec: 60,  note: 'Ribs to pelvis, exhale hard' }
+    { name: 'Hack Squat',            sets: 4, repRange: '6-10' },
+    { name: 'Leg Press',             sets: 3, repRange: '10-15' },
+    { name: 'Seated Leg Curl',       sets: 4, repRange: '10-15' },
+    { name: 'Bulgarian Split Squat', sets: 3, repRange: '8-12' },
+    { name: '45° Back Extension',    sets: 3, repRange: '12-15' },
+    { name: 'Seated Calf Raise',     sets: 3, repRange: '15-20' },
+    { name: 'Cable Crunch',          sets: 3, repRange: '12-15' }
   ]},
   { id: 'tpl-upper', name: 'Fri · Upper', items: [
-    { name: 'Seated Machine Shoulder Press', sets: 3, repRange: '8-12',  restSec: 120, note: 'Back on pad, ribs down' },
-    { name: 'Assisted Pull-Up',              sets: 3, repRange: '8-12',  restSec: 120, note: '3s negative, no kipping' },
-    { name: 'Cable Chest Fly',               sets: 3, repRange: '12-15', restSec: 90,  note: 'Constant elbow bend' },
-    { name: 'Single-Arm Cable Row',          sets: 3, repRange: '10-12', restSec: 90,  note: 'Let the blade travel forward' },
-    { name: 'Dumbbell Lateral Raise',        sets: 4, repRange: '12-20', restSec: 60,  note: 'Light and strict' },
-    { name: 'Reverse Pec Deck',              sets: 3, repRange: '15-20', restSec: 60,  note: 'Thumbs down, no shrug' },
-    { name: 'EZ-Bar Curl',                   sets: 2, repRange: '10-15', restSec: 60,  note: 'No hip drive' },
-    { name: 'Plank', type: 'time', sets: 3, targetSec: 45, restSec: 45,  note: 'Glutes squeezed, ribs down, straight line' }
+    { name: 'Seated Machine Shoulder Press', sets: 3, repRange: '8-12' },
+    { name: 'Assisted Pull-Up',              sets: 3, repRange: '8-12' },
+    { name: 'Cable Chest Fly',               sets: 3, repRange: '12-15' },
+    { name: 'Single-Arm Cable Row',          sets: 3, repRange: '10-12' },
+    { name: 'Dumbbell Lateral Raise',        sets: 4, repRange: '12-20' },
+    { name: 'Reverse Pec Deck',              sets: 3, repRange: '15-20' },
+    { name: 'EZ-Bar Curl',                   sets: 2, repRange: '10-15' },
+    { name: 'Plank',                         sets: 3, targetSec: 45 }
+  ]},
+  { id: 'tpl-mobility', name: 'Mobility · Wind-down', items: [
+    { name: 'Child’s Pose',            sets: 1, targetSec: 60 },
+    { name: 'Cat-Cow',                 sets: 1, repRange: '8-10' },
+    { name: 'World’s Greatest Stretch', sets: 2, targetSec: 45 },
+    { name: 'Couch Stretch',           sets: 2, targetSec: 60 },
+    { name: 'Pigeon Pose',             sets: 2, targetSec: 60 },
+    { name: 'Supine Twist',            sets: 2, targetSec: 45 },
+    { name: 'Legs Up the Wall',        sets: 1, targetSec: 180 }
   ]}
 ];
 
-/* Extra timed movements available in the library from day one. */
-const SEED_EXTRA_TIME = [
-  { name: 'Side Plank', rest: 45 },
-  { name: 'Farmer\u2019s Carry', rest: 90 },
-  { name: 'Treadmill Incline Walk', rest: 60 },
-  { name: 'Stationary Bike', rest: 60 },
-  { name: 'Wall Sit', rest: 60 }
-];
+const EXERCISE_GROUPS = CATALOGUE.map(c => c.group);
+
+/* Bump this whenever the catalogue gains movements, so existing installs
+   pick them up on next load. */
+const CATALOGUE_VERSION = 2;
 
 const SEED_EXERCISES = (() => {
   let list = [];
-  SEED_TEMPLATES.forEach(t => t.items.forEach(it => {
-    list = addExerciseTo(list, it.name, { type: it.type || 'reps', defaultRestSec: it.restSec, custom: false }).list;
+  CATALOGUE.forEach(c => c.items.forEach(it => {
+    list = addExerciseTo(list, it.n, {
+      type: it.t, defaultRestSec: it.r, note: it.note, group: c.group, custom: false
+    }).list;
   }));
-  SEED_EXTRA_TIME.forEach(x => { list = addExerciseTo(list, x.name, { type: 'time', defaultRestSec: x.rest, custom: false }).list; });
   return list;
 })();
 
-/* The seeded rest times now live on the exercises, so the routines drop
-   their own copies and inherit. Change "Bench Press" to 180s once in the
-   library and every routine that uses it follows. */
-const SEED_ROUTINES = SEED_TEMPLATES.map(t => ({
-  ...t,
-  items: t.items.map(({ restSec, ...rest }) => rest)
-}));
-
 const DEFAULT_STATE = {
+  catalogueVersion: CATALOGUE_VERSION,
   exercises: SEED_EXERCISES,
-  templates: SEED_ROUTINES,
+  templates: SEED_TEMPLATES,
   history: [],
   session: null,
-  settings: { webhookUrl: '', sound: true, vibrate: true, defaultRest: 120, autoSync: true }
+  settings: { webhookUrl: '', sound: true, vibrate: true, defaultRest: 120, autoSync: true, syncLibrary: true }
 };
 
 /* Older saves predate the type/isFavorite fields. Fill them in on load
    rather than making every read site defensive. */
+/* Merge the shipped catalogue into an existing library without trampling
+   anything you've edited. New movements are added; blank cues, rests and
+   groups are filled in from the catalogue; values you set yourself are
+   left exactly as they are. */
+function syncCatalogue(list) {
+  let out = list.slice();
+  CATALOGUE.forEach(c => c.items.forEach(it => {
+    const ex = findExercise(out, it.n);
+    if (!ex) {
+      out = addExerciseTo(out, it.n, {
+        type: it.t, defaultRestSec: it.r, note: it.note, group: c.group, custom: false
+      }).list;
+      return;
+    }
+    const fill = {};
+    if (!ex.note) fill.note = it.note;
+    if (ex.defaultRestSec == null) fill.defaultRestSec = it.r;
+    if (!ex.group || ex.group === 'Other') fill.group = c.group;
+    if (Object.keys(fill).length) out = out.map(x => x.id === ex.id ? { ...x, ...fill } : x);
+  }));
+  return out;
+}
+
 function migrate(d) {
   if (!d) return DEFAULT_STATE;
   const s = { ...DEFAULT_STATE, ...d };
   s.settings = { ...DEFAULT_STATE.settings, ...(d.settings || {}) };
-  s.exercises = (d.exercises || []).map(e => ({ type: 'reps', isFavorite: false, custom: true, defaultRestSec: null, ...e }));
+  s.exercises = (d.exercises || []).map(e => ({
+    type: 'reps', isFavorite: false, custom: true, defaultRestSec: null, note: '', group: 'Other', ...e
+  }));
+
+  /* Run the merge once per catalogue release. Gating on a version stamp
+     means anything you delete afterwards stays deleted instead of
+     reappearing on the next reload. */
+  if ((d.catalogueVersion || 0) < CATALOGUE_VERSION) {
+    s.exercises = syncCatalogue(s.exercises);
+    s.catalogueVersion = CATALOGUE_VERSION;
+  } else {
+    s.catalogueVersion = d.catalogueVersion;
+  }
   s.templates = (d.templates || []).map(t => ({ ...t, items: (t.items || []).map(i => ({ type: 'reps', ...i })) }));
   s.history = d.history || [];
   if (s.session) {
@@ -302,6 +566,15 @@ function restFor(item, library, globalRest) {
   return globalRest;
 }
 
+/* Same precedence for the form cue: a note written into this routine wins,
+   otherwise the exercise carries its own. Edit it once in the library and
+   every routine that uses the movement picks it up. */
+function noteFor(item, library) {
+  if (item.note) return String(item.note);
+  const ex = findExercise(library, item.name);
+  return ex && ex.note ? ex.note : '';
+}
+
 function entriesFromItems(items, settings, library = []) {
   return items.map(it => ({
     id: uid(),
@@ -310,7 +583,7 @@ function entriesFromItems(items, settings, library = []) {
     restSec: restFor(it, library, settings.defaultRest),
     repRange: it.repRange || '',
     targetSec: it.targetSec || null,
-    note: it.note || '',
+    note: noteFor(it, library),
     sets: Array.from({ length: it.sets || 3 }, () => blankSet({
       weight: it.weight != null ? String(it.weight) : '',
       duration: it.targetSec != null ? String(it.targetSec) : ''
@@ -327,7 +600,7 @@ const Btn = ({ tone = 'ghost', className = '', children, ...p }) => {
     plain:   'bg-transparent text-muted active:text-txt'
   };
   return (
-    <button {...p} className={`rounded-xl px-4 min-h-[48px] text-[15px] transition-colors ${tones[tone]} ${className}`}>
+    <button {...p} className={`rounded-xl px-4 min-h-[48px] text-[15px] transition-colors disabled:opacity-40 ${tones[tone]} ${className}`}>
       {children}
     </button>
   );
@@ -411,6 +684,26 @@ function App() {
     setTimer(t => (t ? { ...t, running: false, startedAt: null, accumMs: t.targetSec * 1000, finished: true } : t));
   }, [now, timer, state]);
 
+  /* Back the library up whenever it actually changes. Debounced, because
+     typing a form cue would otherwise fire a request per keystroke, and
+     signature-compared so a no-op re-render doesn't trigger a write.
+     The first signature is recorded without sending — loading the app
+     shouldn't push anything on its own. */
+  const libSig = useRef(null);
+  useEffect(() => {
+    if (!state) return;
+    const url = state.settings.webhookUrl.trim();
+    const sig = JSON.stringify(libraryRows(state.exercises));
+    if (libSig.current === null) { libSig.current = sig; return; }
+    if (libSig.current === sig) return;
+    if (!url || !state.settings.syncLibrary) { libSig.current = sig; return; }
+    const id = setTimeout(() => {
+      libSig.current = sig;
+      syncLibraryToSheet(state).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(id);
+  }, [state]);
+
   /* A finished rest bar clears itself so it doesn't sit there mid-set. */
   useEffect(() => {
     if (!timer || !timer.finished || timer.kind !== 'rest' || dialOpen) return;
@@ -492,7 +785,7 @@ function App() {
         </div>
       </header>
 
-      <main className="flex-1 px-5 pt-4 pb-40">
+      <main className="flex-1 px-4 sm:px-5 pt-4 pb-40">
         {tab === 'log'       && <LogView {...props} />}
         {tab === 'templates' && <TemplatesView {...props} />}
         {tab === 'moves'     && <ExercisesView {...props} />}
@@ -753,6 +1046,7 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
       repRange: String(it.repRange || it.reps || ''),
       restSec: (it.restSec != null || it.rest != null) ? Number(it.restSec != null ? it.restSec : it.rest) : null,
       defaultRestSec: it.defaultRestSec != null ? Number(it.defaultRestSec) : null,
+      note: String(it.note || it.cue || ''),
       targetSec: it.targetSec != null ? Number(it.targetSec) : (it.durationSec != null ? Number(it.durationSec) : null),
       weight: it.weight,
       note: String(it.note || it.cue || '')
@@ -764,10 +1058,15 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
       let lib = p.exercises;
       items.forEach(it => {
         const proposed = it.defaultRestSec != null ? it.defaultRestSec : it.restSec;
-        const r = addExerciseTo(lib, it.name, { type: it.type, custom: true, defaultRestSec: proposed });
+        const r = addExerciseTo(lib, it.name, {
+          type: it.type, custom: true, defaultRestSec: proposed, note: it.note
+        });
         lib = r.list;
-        if (!r.added && proposed != null && r.exercise.defaultRestSec == null) {
-          lib = lib.map(x => x.id === r.exercise.id ? { ...x, defaultRestSec: Number(proposed) } : x);
+        if (!r.added) {
+          const fill = {};
+          if (proposed != null && r.exercise.defaultRestSec == null) fill.defaultRestSec = Number(proposed);
+          if (it.note && !r.exercise.note) fill.note = it.note;
+          if (Object.keys(fill).length) lib = lib.map(x => x.id === r.exercise.id ? { ...x, ...fill } : x);
         }
       });
       return {
@@ -859,14 +1158,15 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
       e.sets.forEach((st, i) => {
         if (!st.done) return;
         const isTime = e.type === 'time';
+        // Form cues stay in the app. They're identical on every row, so
+        // writing them to the sheet is pure noise.
         rows.push([
           today(), s.name, e.name, e.type || 'reps', i + 1,
           num(st.weight),
           isTime ? '' : num(st.reps),
           isTime ? num(st.duration) : '',
           st.rpe ? num(st.rpe) : '',
-          isTime ? '' : Math.round(num(st.weight) * num(st.reps)),
-          e.note || ''
+          isTime ? '' : Math.round(num(st.weight) * num(st.reps))
         ]);
       });
     });
@@ -968,7 +1268,7 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
             entries: [...x.entries, {
               id: uid(), name: ex.name, type: ex.type || 'reps',
               restSec: ex.defaultRestSec != null ? ex.defaultRestSec : state.settings.defaultRest,
-              repRange: '', targetSec: null, note: '',
+              repRange: '', targetSec: null, note: ex.note || '',
               sets: [blankSet()]
             }]
           }));
@@ -983,21 +1283,64 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
 function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) {
   const [open, setOpen] = useState(true);
   const isTime = entry.type === 'time';
+  const scrollRef = useRef(null);
 
-  const last = useMemo(() => {
+  const doneCount = entry.sets.filter(x => x.done).length;
+  const allDone = entry.sets.length > 0 && doneCount === entry.sets.length;
+
+  /* Collapse on the transition into "finished", expand again on the
+     transition out. Only firing on the edge means a manual tap after the
+     auto-collapse sticks — we don't fight the user for control. */
+  const wasAllDone = useRef(allDone);
+  useEffect(() => {
+    if (allDone && !wasAllDone.current) setOpen(false);
+    if (!allDone && wasAllDone.current) setOpen(true);
+    wasAllDone.current = allDone;
+  }, [allDone]);
+
+  /* Only paint the scroll shadow when there is actually overflow. */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const check = () => el.classList.toggle('is-scrollable', el.scrollWidth > el.clientWidth + 1);
+    check();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(check) : null;
+    if (ro) ro.observe(el);
+    window.addEventListener('resize', check);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener('resize', check); };
+  }, [open, entry.sets.length, isTime]);
+
+  /* Last time you did this movement, set by set. */
+  const prior = useMemo(() => {
     for (const w of history) {
       const hit = (w.exercises || []).find(x => x.name === entry.name);
-      if (hit && hit.sets.length) {
-        if ((hit.type || 'reps') === 'time') {
-          const best = hit.sets.reduce((a, b) => ((b.durationSec || 0) > (a.durationSec || 0) ? b : a));
-          return `${dur(best.durationSec || 0)} · ${w.date}`;
-        }
-        const best = hit.sets.reduce((a, b) => (b.weightKg > a.weightKg ? b : a));
-        return `${best.weightKg} kg × ${best.reps} · ${w.date}`;
+      if (hit && hit.sets && hit.sets.length) {
+        return { date: w.date, type: hit.type || 'reps', sets: hit.sets };
       }
     }
     return null;
   }, [history, entry.name]);
+
+  const best = useMemo(() => {
+    if (!prior) return null;
+    if (prior.type === 'time') {
+      const b = prior.sets.reduce((a, x) => ((x.durationSec || 0) > (a.durationSec || 0) ? x : a));
+      return `${dur(b.durationSec || 0)} · ${prior.date}`;
+    }
+    const b = prior.sets.reduce((a, x) => (x.weightKg > a.weightKg ? x : a));
+    return `${b.weightKg} kg × ${b.reps} · ${prior.date}`;
+  }, [prior]);
+
+  // Ghosted in the empty field, so last session's number is right where
+  // you're about to type this session's.
+  const ghost = (i, field) => {
+    const p = prior && prior.sets[i];
+    if (!p) return '—';
+    if (field === 'weight') return p.weightKg ? String(p.weightKg) : '—';
+    if (field === 'reps') return prior.type !== 'time' && p.reps ? String(p.reps) : '—';
+    if (field === 'duration') return prior.type === 'time' && p.durationSec ? String(p.durationSec) : '—';
+    return '—';
+  };
 
   const upd = (i, key, val) =>
     onChange(e => ({ ...e, sets: e.sets.map((st, j) => j === i ? { ...st, [key]: val } : st) }));
@@ -1013,32 +1356,42 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
     return { ...e, sets: [...e.sets, blankSet({ weight: prev ? prev.weight : '', duration: prev ? prev.duration : '' })] };
   });
 
-  const doneCount = entry.sets.filter(x => x.done).length;
-  const cols = 'grid grid-cols-[26px_1fr_1fr_46px_46px] gap-2';
+  // What the collapsed header shows instead of the target line.
+  const summary = entry.sets.filter(x => x.done).map(st => isTime
+    ? `${st.weight ? st.weight + 'kg ' : ''}${num(st.duration)}s`
+    : `${num(st.weight)}×${num(st.reps)}`).join('  ·  ');
+
+  const cell = st => `num text-center w-full min-w-0 bg-ink border rounded-lg py-3 text-[17px] focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`;
 
   return (
-    <section className="bg-panel border border-line rounded-2xl overflow-hidden">
-      <div className="px-4 py-3 flex items-center gap-3">
-        <button onClick={() => setOpen(o => !o)} className="flex-1 text-left min-w-0">
-          <div className="font-semibold leading-tight truncate">{entry.name}</div>
-          <div className="text-[11px] text-muted num mt-0.5">
-            {doneCount}/{entry.sets.length} sets
-            {isTime
-              ? (entry.targetSec ? <> · target {dur(entry.targetSec)}</> : null)
-              : (entry.repRange ? <> · target {entry.repRange}</> : null)}
-            {entry.restSec ? <> · rest {mmss(entry.restSec)}</> : null}
-          </div>
-        </button>
-        <span className={`num text-[11px] px-2 py-1 rounded-md ${doneCount === entry.sets.length ? 'bg-ok/15 text-ok' : 'bg-raise text-muted'}`}>
-          {doneCount === entry.sets.length ? 'done' : open ? '▾' : '▸'}
+    <section className={`bg-panel border rounded-2xl overflow-hidden ${allDone ? 'border-ok/30' : 'border-line'}`}>
+      <button onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        className="w-full px-4 py-3 flex items-center gap-3 text-left active:bg-raise">
+        <span className="flex-1 min-w-0">
+          <span className="block font-semibold leading-tight truncate">{entry.name}</span>
+          <span className="block text-[11px] text-muted num mt-0.5 truncate">
+            {!open && doneCount > 0 ? summary : (
+              <>
+                {doneCount}/{entry.sets.length} sets
+                {isTime
+                  ? (entry.targetSec ? ` · target ${dur(entry.targetSec)}` : '')
+                  : (entry.repRange ? ` · target ${entry.repRange}` : '')}
+                {entry.restSec ? ` · rest ${mmss(entry.restSec)}` : ''}
+              </>
+            )}
+          </span>
         </span>
-      </div>
+        <span className={`num text-[11px] px-2 py-1 rounded-md shrink-0 ${allDone ? 'bg-ok/15 text-ok' : 'bg-raise text-muted'}`}>
+          {allDone ? (open ? 'done ▾' : 'done ▸') : (open ? '▾' : '▸')}
+        </span>
+      </button>
 
       {open && (
-        <div className="px-4 pb-4">
-          {entry.note && <p className="text-[12px] text-amber/80 mb-3 leading-snug">{entry.note}</p>}
+        <div className="px-3 pb-4">
+          {entry.note && <p className="text-[12px] text-amber/80 mb-3 leading-snug px-1">{entry.note}</p>}
 
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-3 px-1">
             <Seg
               value={entry.type || 'reps'}
               onChange={t => onChange(e => ({ ...e, type: t }))}
@@ -1052,61 +1405,67 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
                 className="num w-9 bg-transparent text-center text-[13px] text-txt focus:outline-none" />
               <span className="text-[11px] text-muted">s</span>
             </label>
-            {last && <span className="text-[11px] text-muted num truncate ml-auto">Best: {last}</span>}
+            {best && <span className="text-[11px] text-muted num truncate ml-auto">Last: {best}</span>}
           </div>
 
-          <div className={`${cols} text-[10px] uppercase tracking-wider text-muted mb-1.5 px-1`}>
-            <span>#</span><span>kg</span><span>{isTime ? 'secs' : 'reps'}</span><span>{isTime ? '⏱' : 'rpe'}</span><span></span>
+          <div ref={scrollRef} className="set-scroll">
+            <div className="set-grid text-[10px] uppercase tracking-wider text-muted mb-1.5">
+              <span className="set-pin text-center">#</span>
+              <span className="text-center">kg</span>
+              <span className="text-center">{isTime ? 'secs' : 'reps'}</span>
+              <span className="text-center">{isTime ? '⏱' : 'rpe'}</span>
+              <span></span>
+            </div>
+
+            <div className="space-y-2">
+              {entry.sets.map((st, i) => (
+                <div key={i} className="set-grid">
+                  <span className={`set-pin num text-center text-sm py-3 ${st.done ? 'text-ok' : 'text-muted'}`}>{i + 1}</span>
+
+                  <input inputMode="decimal" placeholder={ghost(i, 'weight')} value={st.weight}
+                    onChange={e => upd(i, 'weight', e.target.value)}
+                    aria-label={`Set ${i + 1} weight in kg`}
+                    className={cell(st)} />
+
+                  {isTime ? (
+                    <input inputMode="numeric" placeholder={ghost(i, 'duration')} value={st.duration}
+                      onChange={e => upd(i, 'duration', e.target.value)}
+                      aria-label={`Set ${i + 1} duration in seconds`}
+                      className={cell(st)} />
+                  ) : (
+                    <input inputMode="numeric" placeholder={ghost(i, 'reps')} value={st.reps}
+                      onChange={e => upd(i, 'reps', e.target.value)}
+                      aria-label={`Set ${i + 1} reps`}
+                      className={cell(st)} />
+                  )}
+
+                  {isTime ? (
+                    <button
+                      onClick={() => openDial({
+                        mode: num(st.duration) > 0 ? 'countdown' : 'stopwatch',
+                        targetSec: num(st.duration) || entry.targetSec || 60,
+                        label: `${entry.name} · set ${i + 1}`,
+                        sink: { entryId: entry.id, setIndex: i }
+                      })}
+                      aria-label={`Time set ${i + 1}`}
+                      className="h-12 w-full rounded-lg border border-amber/40 text-amber text-lg active:bg-amber/10">⏱</button>
+                  ) : (
+                    <input inputMode="decimal" placeholder="—" value={st.rpe}
+                      onChange={e => upd(i, 'rpe', e.target.value)}
+                      aria-label={`Set ${i + 1} RPE`}
+                      className="num text-center w-full min-w-0 bg-ink border border-line rounded-lg py-3 text-sm text-muted focus:outline-none focus:border-amber" />
+                  )}
+
+                  <button onClick={() => toggle(i)} aria-label={st.done ? `Undo set ${i + 1}` : `Complete set ${i + 1}`}
+                    className={`h-12 w-full rounded-lg border text-lg font-bold ${st.done ? 'bg-ok text-ink border-ok' : 'bg-raise border-line text-muted'}`}>
+                    ✓
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="space-y-2">
-            {entry.sets.map((st, i) => (
-              <div key={i} className={`${cols} items-center`}>
-                <span className={`num text-center text-sm ${st.done ? 'text-ok' : 'text-muted'}`}>{i + 1}</span>
-
-                <input inputMode="decimal" placeholder="—" value={st.weight}
-                  onChange={e => upd(i, 'weight', e.target.value)}
-                  aria-label={`Set ${i + 1} weight`}
-                  className={`num text-center bg-ink border rounded-lg py-3 text-lg focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`} />
-
-                {isTime ? (
-                  <input inputMode="numeric" placeholder="—" value={st.duration}
-                    onChange={e => upd(i, 'duration', e.target.value)}
-                    aria-label={`Set ${i + 1} duration in seconds`}
-                    className={`num text-center bg-ink border rounded-lg py-3 text-lg focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`} />
-                ) : (
-                  <input inputMode="numeric" placeholder="—" value={st.reps}
-                    onChange={e => upd(i, 'reps', e.target.value)}
-                    aria-label={`Set ${i + 1} reps`}
-                    className={`num text-center bg-ink border rounded-lg py-3 text-lg focus:outline-none focus:border-amber ${st.done ? 'border-ok/40 text-ok' : 'border-line'}`} />
-                )}
-
-                {isTime ? (
-                  <button
-                    onClick={() => openDial({
-                      mode: num(st.duration) > 0 ? 'countdown' : 'stopwatch',
-                      targetSec: num(st.duration) || entry.targetSec || 60,
-                      label: `${entry.name} · set ${i + 1}`,
-                      sink: { entryId: entry.id, setIndex: i }
-                    })}
-                    aria-label={`Time set ${i + 1}`}
-                    className="h-12 rounded-lg border border-amber/40 text-amber text-lg active:bg-amber/10">⏱</button>
-                ) : (
-                  <input inputMode="decimal" placeholder="—" value={st.rpe}
-                    onChange={e => upd(i, 'rpe', e.target.value)}
-                    aria-label={`Set ${i + 1} RPE`}
-                    className="num text-center bg-ink border border-line rounded-lg py-3 text-sm text-muted focus:outline-none focus:border-amber" />
-                )}
-
-                <button onClick={() => toggle(i)} aria-label={st.done ? 'Undo set' : 'Complete set'}
-                  className={`h-12 rounded-lg border text-lg font-bold ${st.done ? 'bg-ok text-ink border-ok' : 'bg-raise border-line text-muted'}`}>
-                  ✓
-                </button>
-              </div>
-            ))}
-          </div>
-
-          <div className="flex gap-2 mt-3">
+          <div className="flex gap-2 mt-3 px-1">
             <button onClick={addSet} className="flex-1 text-[13px] text-muted border border-line rounded-lg py-2.5 active:bg-raise">+ Set</button>
             <button onClick={onRest} className="flex-1 text-[13px] text-amber border border-amber/40 rounded-lg py-2.5 active:bg-amber/10">Rest</button>
             <button onClick={onRemove} className="px-4 text-[13px] text-bad border border-bad/30 rounded-lg py-2.5">Remove</button>
@@ -1121,8 +1480,11 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
 function AddExerciseSheet({ open, onClose, state, setState, onPick, say }) {
   const [q, setQ] = useState('');
   const [newType, setNewType] = useState('reps');
+  const [newNote, setNewNote] = useState('');
+  const [newRest, setNewRest] = useState('');
 
-  const matches = state.exercises.filter(e => normalize(e.name).includes(normalize(q)));
+  const matches = state.exercises.filter(e =>
+    normalize(e.name).includes(normalize(q)) || normalize(e.note).includes(normalize(q)));
   const list = [...matches].sort((a, b) =>
     (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || a.name.localeCompare(b.name));
   const duplicate = !!findExercise(state.exercises, q);
@@ -1130,10 +1492,15 @@ function AddExerciseSheet({ open, onClose, state, setState, onPick, say }) {
   const createAndPick = () => {
     const name = q.trim();
     if (!name) return;
-    const r = addExerciseTo(state.exercises, name, { type: newType });
-    if (r.added) setState(p => ({ ...p, exercises: addExerciseTo(p.exercises, name, { type: newType }).list }));
+    const opts = {
+      type: newType,
+      defaultRestSec: String(newRest).trim() === '' ? null : Math.max(0, num(newRest)),
+      note: newNote
+    };
+    const r = addExerciseTo(state.exercises, name, opts);
+    if (r.added) setState(p => ({ ...p, exercises: addExerciseTo(p.exercises, name, opts).list }));
     onPick(r.exercise);
-    setQ('');
+    setQ(''); setNewNote(''); setNewRest('');
   };
 
   return (
@@ -1142,10 +1509,19 @@ function AddExerciseSheet({ open, onClose, state, setState, onPick, say }) {
 
       {q.trim() && !duplicate && (
         <div className="mt-3 bg-raise border border-line rounded-xl p-3">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-[12px] text-muted">Track this as</span>
+          <textarea rows={2} value={newNote} placeholder="Form cue (optional) — saved to your library"
+            onChange={e => setNewNote(e.target.value)}
+            className="w-full bg-ink border border-line rounded-lg px-3 py-2 text-[13px] text-amber/90 placeholder-muted/50 focus:outline-none focus:border-amber" />
+          <div className="flex items-center gap-2 my-3">
             <Seg value={newType} onChange={setNewType}
               options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
+            <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+              <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
+              <input inputMode="numeric" placeholder={String(state.settings.defaultRest)} value={newRest}
+                onChange={e => setNewRest(e.target.value)} aria-label="Default rest in seconds"
+                className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
+              <span className="text-[11px] text-muted">s</span>
+            </label>
           </div>
           <button onClick={createAndPick} className="w-full bg-amber text-ink font-semibold rounded-lg py-3">
             Create “{q.trim()}”
@@ -1159,14 +1535,16 @@ function AddExerciseSheet({ open, onClose, state, setState, onPick, say }) {
       <div className="mt-3 space-y-1.5 max-h-[46vh] overflow-y-auto">
         {list.map(e => (
           <button key={e.id} onClick={() => { onPick(e); setQ(''); }}
-            className="w-full text-left bg-raise border border-line rounded-xl px-4 py-3.5 active:bg-line flex justify-between items-center gap-3">
-            <span className="truncate">{e.isFavorite && <span className="text-amber mr-1.5">★</span>}{e.name}</span>
-            <span className="flex items-center gap-2 shrink-0">
+            className="w-full text-left bg-raise border border-line rounded-xl px-4 py-3 active:bg-line flex justify-between items-start gap-3">
+            <span className="min-w-0">
+              <span className="block truncate">{e.isFavorite && <span className="text-amber mr-1.5">★</span>}{e.name}</span>
+              {e.note && <span className="block text-[11px] text-muted truncate mt-0.5">{e.note}</span>}
+            </span>
+            <span className="flex items-center gap-2 shrink-0 pt-0.5">
               {e.type === 'time' && <span className="text-[10px] uppercase tracking-wider text-muted">time</span>}
               <span className="num text-[10px] text-muted">
                 {e.defaultRestSec != null ? `${e.defaultRestSec}s` : `${state.settings.defaultRest}s`}
               </span>
-              {e.custom && <span className="text-[10px] uppercase tracking-wider text-amber">custom</span>}
             </span>
           </button>
         ))}
@@ -1232,11 +1610,13 @@ function TemplatesView({ state, setState, say, setTab }) {
       id: uid(), name,
       items: s.entries.map(e => {
         const lib = findExercise(state.exercises, e.name);
-        const inherits = lib && lib.defaultRestSec != null && Number(lib.defaultRestSec) === Number(e.restSec);
+        const sameRest = lib && lib.defaultRestSec != null && Number(lib.defaultRestSec) === Number(e.restSec);
+        const sameNote = lib && lib.note === (e.note || '');
         return {
           name: e.name, type: e.type || 'reps', sets: e.sets.length,
           repRange: e.repRange || '', targetSec: e.targetSec || (e.type === 'time' ? num(e.sets[0]?.duration) || null : null),
-          restSec: inherits ? null : e.restSec, note: e.note || ''
+          restSec: sameRest ? null : e.restSec,
+          note: sameNote ? '' : (e.note || '')
         };
       })
     };
@@ -1304,102 +1684,158 @@ function TemplatesView({ state, setState, say, setTab }) {
    Exercise library
    ──────────────────────────────────────────────────────────────── */
 function ExercisesView({ state, setState, say }) {
-  const [name, setName] = useState('');
-  const [type, setType] = useState('reps');
-  const [rest, setRestField] = useState('');
+  const [q, setQ] = useState('');
   const [filter, setFilter] = useState('all');
+  const [openId, setOpenId] = useState(null);
+  const [draft, setDraft] = useState({ name: '', type: 'reps', rest: '', note: '', group: 'Other' });
+
+  const groups = useMemo(() => {
+    const seen = [];
+    state.exercises.forEach(e => { if (e.group && !seen.includes(e.group)) seen.push(e.group); });
+    const order = EXERCISE_GROUPS.filter(g => seen.includes(g));
+    return [...order, ...seen.filter(g => !order.includes(g))];
+  }, [state.exercises]);
 
   const add = () => {
-    const clean = name.trim();
+    const clean = draft.name.trim();
     if (!clean) return;
     if (findExercise(state.exercises, clean)) { say(`“${clean}” is already in your library`); return; }
-    const defaultRestSec = String(rest).trim() === '' ? null : Math.max(0, num(rest));
-    setState(p => ({ ...p, exercises: addExerciseTo(p.exercises, clean, { type, defaultRestSec }).list }));
-    setName('');
-    setRestField('');
+    setState(p => ({
+      ...p,
+      exercises: addExerciseTo(p.exercises, clean, {
+        type: draft.type,
+        defaultRestSec: String(draft.rest).trim() === '' ? null : Math.max(0, num(draft.rest)),
+        note: draft.note,
+        group: draft.group
+      }).list
+    }));
+    setDraft({ name: '', type: 'reps', rest: '', note: '', group: draft.group });
     say('Exercise added');
   };
 
-  const toggleFav = id => setState(p => ({
-    ...p, exercises: p.exercises.map(e => e.id === id ? { ...e, isFavorite: !e.isFavorite } : e)
+  const patch = (id, fields) => setState(p => ({
+    ...p, exercises: p.exercises.map(e => e.id === id ? { ...e, ...fields } : e)
   }));
 
-  const setType2 = (id, t) => setState(p => ({
-    ...p, exercises: p.exercises.map(e => e.id === id ? { ...e, type: t } : e)
-  }));
+  const shown = useMemo(() => state.exercises
+    .filter(e => {
+      if (filter === 'fav' && !e.isFavorite) return false;
+      if (filter !== 'all' && filter !== 'fav' && e.group !== filter) return false;
+      if (!q.trim()) return true;
+      return normalize(e.name).includes(normalize(q)) || normalize(e.note).includes(normalize(q));
+    })
+    .sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || a.name.localeCompare(b.name)),
+    [state.exercises, filter, q]);
 
-  // Blank means "fall back to the global default", so store null, not 0.
-  const setRest = (id, val) => setState(p => ({
-    ...p,
-    exercises: p.exercises.map(e => e.id === id
-      ? { ...e, defaultRestSec: String(val).trim() === '' ? null : Math.max(0, num(val)) }
-      : e)
-  }));
-
-  const shown = state.exercises
-    .filter(e => filter === 'all' || (filter === 'fav' ? e.isFavorite : e.type === filter))
-    .sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || a.name.localeCompare(b.name));
+  const chip = (v, label) => (
+    <button key={v} onClick={() => setFilter(v)}
+      className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] border transition-colors ${
+        filter === v ? 'bg-amber text-ink border-amber font-semibold' : 'border-line text-muted'}`}>
+      {label}
+    </button>
+  );
 
   return (
     <div>
       <h1 className="text-2xl font-bold mb-1">Exercises</h1>
-      <p className="text-muted text-sm mb-5">
-        Add the machines your gym actually has — colour, brand, whatever you call them on the floor.
-        Names are matched case-insensitively, so nothing can land in here twice. Set a rest time
-        per exercise and every session that uses it starts the countdown there.
+      <p className="text-muted text-sm mb-4">
+        {state.exercises.length} movements. The rest time and form cue you set here follow the
+        exercise into every routine and session that uses it.
       </p>
 
-      <div className="bg-panel border border-line rounded-2xl p-4 mb-5">
-        <Field placeholder="e.g. Yellow Lever Chest Press" value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') add(); }} />
-        <div className="flex items-center gap-2 mt-3">
-          <Seg value={type} onChange={setType} options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
-          <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
-            <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
-            <input inputMode="numeric" placeholder={String(state.settings.defaultRest)} value={rest}
-              onChange={e => setRestField(e.target.value)} aria-label="Default rest in seconds"
-              className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
-            <span className="text-[11px] text-muted">s</span>
-          </label>
-          <Btn tone="primary" onClick={add} className="px-6 ml-auto">Add</Btn>
-        </div>
-      </div>
+      <Field placeholder="Search names and cues" value={q} onChange={e => setQ(e.target.value)} className="mb-3" />
 
-      <div className="mb-3">
-        <Seg value={filter} onChange={setFilter} options={[
-          { v: 'all', label: 'All' }, { v: 'fav', label: '★ Favourites' },
-          { v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }
-        ]} />
+      <div className="flex gap-2 overflow-x-auto pb-1 mb-4 -mx-4 px-4">
+        {chip('all', 'All')}
+        {chip('fav', '★')}
+        {groups.map(g => chip(g, g))}
       </div>
 
       <div className="space-y-1.5">
-        {shown.map(e => (
-          <div key={e.id} className="bg-panel border border-line rounded-xl px-3 py-2.5">
-            <div className="flex items-center gap-2">
-              <button onClick={() => toggleFav(e.id)} aria-label={`Favourite ${e.name}`}
-                className={`text-lg px-1 ${e.isFavorite ? 'text-amber' : 'text-line'}`}>★</button>
-              <span className="text-[14px] truncate flex-1">{e.name}</span>
-              <button onClick={() => setState(p => ({ ...p, exercises: p.exercises.filter(x => x.id !== e.id) }))}
-                className="text-muted text-xl leading-none px-1" aria-label={`Delete ${e.name}`}>×</button>
+        {shown.map(e => {
+          const isOpen = openId === e.id;
+          return (
+            <div key={e.id} className="bg-panel border border-line rounded-xl">
+              <div className="flex items-center gap-2 px-3 py-2.5">
+                <button onClick={() => patch(e.id, { isFavorite: !e.isFavorite })} aria-label={`Favourite ${e.name}`}
+                  className={`text-lg px-1 ${e.isFavorite ? 'text-amber' : 'text-line'}`}>★</button>
+                <button onClick={() => setOpenId(isOpen ? null : e.id)} className="flex-1 min-w-0 text-left">
+                  <span className="block text-[14px] truncate">{e.name}</span>
+                  <span className="block text-[11px] text-muted truncate mt-0.5">
+                    {e.note
+                      ? e.note
+                      : <span className="italic opacity-60">No cue yet — tap to add one</span>}
+                  </span>
+                </button>
+                <span className="num text-[10px] text-muted shrink-0">
+                  {e.type === 'time' ? 'time' : 'reps'} · {e.defaultRestSec != null ? `${e.defaultRestSec}s` : `${state.settings.defaultRest}s`}
+                </span>
+                <span className="text-muted text-[11px] shrink-0">{isOpen ? '▾' : '▸'}</span>
+              </div>
+
+              {isOpen && (
+                <div className="px-3 pb-3 pt-1 border-t border-line space-y-3">
+                  <label className="block">
+                    <span className="block text-[10px] uppercase tracking-[0.12em] text-muted mb-1.5">Form cue</span>
+                    <textarea rows={2} value={e.note} placeholder="e.g. Elbows 45°, blades pinned"
+                      onChange={ev => patch(e.id, { note: ev.target.value })}
+                      className="w-full bg-ink border border-line rounded-lg px-3 py-2 text-[13px] text-amber/90 placeholder-muted/50 focus:outline-none focus:border-amber" />
+                  </label>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Seg value={e.type || 'reps'} onChange={t => patch(e.id, { type: t })}
+                      options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
+                    <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+                      <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
+                      <input inputMode="numeric" placeholder={String(state.settings.defaultRest)}
+                        value={e.defaultRestSec == null ? '' : e.defaultRestSec}
+                        onChange={ev => patch(e.id, {
+                          defaultRestSec: String(ev.target.value).trim() === '' ? null : Math.max(0, num(ev.target.value))
+                        })}
+                        aria-label={`Default rest for ${e.name} in seconds`}
+                        className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
+                      <span className="text-[11px] text-muted">s</span>
+                    </label>
+                    <span className="text-[11px] text-muted">{e.group}</span>
+                    <button onClick={() => {
+                      if (sure(`Delete ${e.name} from your library?`)) {
+                        setState(p => ({ ...p, exercises: p.exercises.filter(x => x.id !== e.id) }));
+                        setOpenId(null);
+                      }
+                    }} className="ml-auto text-[12px] text-bad border border-bad/30 rounded-lg px-3 py-1.5">Delete</button>
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="flex items-center gap-2 mt-2 pl-1">
-              <Seg value={e.type || 'reps'} onChange={t => setType2(e.id, t)}
-                options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
-              <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
-                <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
-                <input inputMode="numeric" placeholder={String(state.settings.defaultRest)}
-                  value={e.defaultRestSec == null ? '' : e.defaultRestSec}
-                  onChange={ev => setRest(e.id, ev.target.value)}
-                  aria-label={`Default rest for ${e.name} in seconds`}
-                  className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
-                <span className="text-[11px] text-muted">s</span>
-              </label>
-              {e.defaultRestSec == null && <span className="text-[10px] text-muted">using global</span>}
-            </div>
-          </div>
-        ))}
-        {shown.length === 0 && <p className="text-muted text-sm">Nothing matches that filter.</p>}
+          );
+        })}
+        {shown.length === 0 && <p className="text-muted text-sm">Nothing matches that search.</p>}
+      </div>
+
+      <div className="bg-panel border border-line rounded-2xl p-4 mt-6">
+        <h2 className="text-[11px] uppercase tracking-[0.14em] text-muted mb-3">Add an exercise</h2>
+        <Field placeholder="e.g. Yellow Lever Chest Press" value={draft.name}
+          onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} />
+        <textarea rows={2} value={draft.note} placeholder="Form cue — what you want to read mid-set"
+          onChange={e => setDraft(d => ({ ...d, note: e.target.value }))}
+          className="w-full mt-2 bg-ink border border-line rounded-xl px-3 py-2 text-[13px] text-amber/90 placeholder-muted/50 focus:outline-none focus:border-amber" />
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <Seg value={draft.type} onChange={t => setDraft(d => ({ ...d, type: t }))}
+            options={[{ v: 'reps', label: 'Reps' }, { v: 'time', label: 'Time' }]} />
+          <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+            <span className="text-[10px] uppercase tracking-wider text-muted">rest</span>
+            <input inputMode="numeric" placeholder={String(state.settings.defaultRest)} value={draft.rest}
+              onChange={e => setDraft(d => ({ ...d, rest: e.target.value }))} aria-label="Default rest in seconds"
+              className="num w-10 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
+            <span className="text-[11px] text-muted">s</span>
+          </label>
+          <select value={draft.group} onChange={e => setDraft(d => ({ ...d, group: e.target.value }))}
+            aria-label="Group"
+            className="bg-ink border border-line rounded-lg px-2 py-2 text-[13px] text-txt focus:outline-none focus:border-amber">
+            {[...EXERCISE_GROUPS, 'Other'].map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+          <Btn tone="primary" onClick={add} className="px-6 ml-auto">Add</Btn>
+        </div>
       </div>
     </div>
   );
@@ -1499,19 +1935,78 @@ function SettingsView({ state, setState, say }) {
   const s = state.settings;
   const set = (k, v) => setState(p => ({ ...p, settings: { ...p.settings, [k]: v } }));
 
+  const [busy, setBusy] = useState('');
+
   const testHook = async () => {
     const url = s.webhookUrl.trim();
     if (!url) { say('Paste your Apps Script URL first.'); return; }
     try {
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ rows: [[today(), 'Connection test', '—', 'reps', 0, 0, 0, '', '', 0, 'sent from Iron Desk']] })
-      });
+      await postWebhook(url, { rows: [[today(), 'Connection test', 'Iron Desk', 'reps', 0, 0, 0, '', '', 0]] });
       say('Test row sent. Check your sheet.');
     } catch (e) {
       say("Couldn't reach the script. Check the URL is the /exec one.");
     }
+  };
+
+  const backupLibrary = async () => {
+    const url = s.webhookUrl.trim();
+    if (!url) { say('Paste your Apps Script URL first.'); return; }
+    setBusy('backup');
+    try {
+      await syncLibraryToSheet(state);
+      say(`Backed up ${state.exercises.length} exercises to the Library tab`);
+    } catch (e) {
+      say("Couldn't reach the script. Check the URL and redeploy.");
+    }
+    setBusy('');
+  };
+
+  const importLibrary = async () => {
+    const url = s.webhookUrl.trim();
+    if (!url) { say('Paste your Apps Script URL first.'); return; }
+    if (!sure('Merge the Library tab into this device? Matching names are overwritten with the sheet version.')) return;
+    setBusy('import');
+    try {
+      const data = await fetchLibrary(url);
+      const rows = (data && data.exercises) || [];
+      if (!rows.length) { say('The Library tab came back empty.'); setBusy(''); return; }
+      let added = 0, updated = 0;
+      setState(p => {
+        let lib = p.exercises;
+        rows.forEach(r => {
+          if (!r || !r.name) return;
+          const fields = {
+            type: r.type === 'time' ? 'time' : 'reps',
+            defaultRestSec: (r.defaultRestSec === '' || r.defaultRestSec == null) ? null : Number(r.defaultRestSec),
+            note: r.note || '',
+            group: r.group || 'Other',
+            isFavorite: r.isFavorite === true || String(r.isFavorite).toLowerCase() === 'true'
+          };
+          const res = addExerciseTo(lib, r.name, fields);
+          lib = res.list;
+          if (res.added) added++;
+          else {
+            updated++;
+            lib = lib.map(x => x.id === res.exercise.id ? { ...x, ...fields } : x);
+          }
+        });
+        return { ...p, exercises: lib };
+      });
+      say(`${added} added, ${updated} updated from your sheet`);
+    } catch (e) {
+      say("Couldn't read the Library tab. Redeploy the script as a new version.");
+    }
+    setBusy('');
+  };
+
+  const restoreCatalogue = () => {
+    if (!sure('Add back any built-in movements missing from your library? Your own edits are kept.')) return;
+    setState(p => {
+      const before = p.exercises.length;
+      const next = syncCatalogue(p.exercises);
+      setTimeout(() => say(`${next.length - before} movements restored`), 0);
+      return { ...p, exercises: next };
+    });
   };
 
   const Toggle = ({ label, hint, k }) => (
@@ -1540,8 +2035,8 @@ function SettingsView({ state, setState, say }) {
           value={s.webhookUrl} onChange={e => set('webhookUrl', e.target.value)} />
         <p className="text-[11px] text-muted mt-2 leading-relaxed">
           Deploy the script as a web app with access set to Anyone, then paste the /exec URL here.
-          The sheet now carries type and duration columns — if you set this up before, copy the
-          script again and redeploy.
+          Ten columns: date, workout, exercise, type, set, weight, reps, duration, rpe, volume.
+          Form cues aren’t sent — they’re the same every session, so they’d only pad the sheet.
         </p>
         <div className="grid grid-cols-2 gap-3 mt-3">
           <Btn onClick={testHook}>Send a test row</Btn>
@@ -1565,6 +2060,21 @@ function SettingsView({ state, setState, say }) {
 
       <div className="space-y-2">
         <h2 className="text-[11px] uppercase tracking-[0.14em] text-muted mb-3">Data</h2>
+
+        <Toggle k="syncLibrary" label="Sync library automatically"
+          hint="Pushes to the Library tab a couple of seconds after any add, edit or import" />
+        <Btn className="w-full" onClick={backupLibrary} disabled={busy === 'backup'}>
+          {busy === 'backup' ? 'Sending…' : `Backup Library to Sheet (${state.exercises.length})`}
+        </Btn>
+        <Btn className="w-full" onClick={importLibrary} disabled={busy === 'import'}>
+          {busy === 'import' ? 'Reading…' : 'Import Library from Sheet'}
+        </Btn>
+        <Btn className="w-full" onClick={restoreCatalogue}>Restore missing built-in movements</Btn>
+        <p className="text-[11px] text-muted leading-relaxed mb-2">
+          The Library tab stores {LIBRARY_COLUMNS.join(', ')}. Importing merges by name —
+          matching exercises take the sheet’s values, new ones are added, and nothing on this
+          device is deleted.
+        </p>
         <Btn className="w-full" onClick={() => copyText(JSON.stringify(state, null, 2)).then(() => say('Backup copied'))}>
           Copy a full backup
         </Btn>
@@ -1586,34 +2096,124 @@ function SettingsView({ state, setState, say }) {
   );
 }
 
-const APPS_SCRIPT = `const SHEET_NAME = 'Workouts';
-const HEADERS = ['date','workout','exercise','type','set','weight_kg','reps','duration_s','rpe','volume_kg','notes'];
+const APPS_SCRIPT = `const WORKOUT_SHEET = 'Workouts';
+const LIBRARY_SHEET = 'Library';
+const WORKOUT_HEADERS = ['date','workout','exercise','type','set','weight_kg','reps','duration_s','rpe','volume_kg'];
+const LIBRARY_HEADERS = ['name','type','defaultRestSec','isFavorite','note','group'];
 
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    let sheet = ss.getSheetByName(SHEET_NAME);
-    if (!sheet) {
-      sheet = ss.insertSheet(SHEET_NAME);
-      sheet.appendRow(HEADERS);
-      sheet.getRange(1, 1, 1, HEADERS.length).setFontWeight('bold');
-      sheet.setFrozenRows(1);
-    }
-    const rows = body.rows || [];
-    if (!rows.length) return json({ ok: false, error: 'No rows in request' });
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-    return json({ ok: true, appended: rows.length });
+    // Current payload: 2D rows in LIBRARY_HEADERS order.
+    if (body.action === 'syncLibrary') return reply(upsertLibrary(body.library || []));
+    // Older payload, kept so an app that hasn't updated yet still works.
+    if (body.action === 'library.upsert') return reply(upsertLibrary(objectsToRows(body.exercises || [])));
+    return reply(appendWorkout(body.rows || []));
   } catch (err) {
-    return json({ ok: false, error: String(err) });
+    return reply({ ok: false, error: String(err) });
   }
 }
 
-function doGet() { return json({ ok: true, message: 'Workout webhook is live' }); }
+function objectsToRows(list) {
+  return list.map(function (x) {
+    return [
+      x.name,
+      x.type || 'reps',
+      x.defaultRestSec == null ? '' : x.defaultRestSec,
+      x.isFavorite === true,
+      x.note || '',
+      x.group || 'Other'
+    ];
+  });
+}
 
-function json(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  try {
+    if (p.action === 'library') return reply(listLibrary(), p.callback);
+    return reply({ ok: true, message: 'Iron Desk webhook is live' }, p.callback);
+  } catch (err) {
+    return reply({ ok: false, error: String(err) }, p.callback);
+  }
+}
+
+function sheetFor(name, headers) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.appendRow(headers);
+    sh.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function appendWorkout(rows) {
+  if (!rows.length) return { ok: false, error: 'No rows in request' };
+  const sh = sheetFor(WORKOUT_SHEET, WORKOUT_HEADERS);
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  return { ok: true, appended: rows.length };
+}
+
+function upsertLibrary(rows) {
+  if (!rows.length) return { ok: false, error: 'No library rows in request' };
+  const sh = sheetFor(LIBRARY_SHEET, LIBRARY_HEADERS);
+  const width = LIBRARY_HEADERS.length;
+  const last = sh.getLastRow();
+
+  // Map existing names (trimmed, lowercased) to their row number.
+  const index = {};
+  if (last > 1) {
+    const names = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < names.length; i++) {
+      const key = String(names[i][0]).trim().toLowerCase();
+      if (key) index[key] = i + 2;
+    }
+  }
+
+  const fresh = [];
+  let updated = 0;
+  rows.forEach(function (r) {
+    if (!r || !String(r[0] || '').trim()) return;
+    // Pad or trim so a short row can never shift the columns.
+    const row = [];
+    for (var c = 0; c < width; c++) row.push(r[c] === undefined ? '' : r[c]);
+    const at = index[String(r[0]).trim().toLowerCase()];
+    if (at) { sh.getRange(at, 1, 1, width).setValues([row]); updated++; }
+    else fresh.push(row);
+  });
+
+  if (fresh.length) sh.getRange(sh.getLastRow() + 1, 1, fresh.length, width).setValues(fresh);
+  return { ok: true, added: fresh.length, updated: updated };
+}
+
+function listLibrary() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LIBRARY_SHEET);
+  if (!sh || sh.getLastRow() < 2) return { ok: true, exercises: [] };
+  const values = sh.getRange(2, 1, sh.getLastRow() - 1, LIBRARY_HEADERS.length).getValues();
+  const out = values.filter(function (r) { return String(r[0]).trim() !== ''; }).map(function (r) {
+    return {
+      name: String(r[0]).trim(),
+      type: String(r[1]).trim() === 'time' ? 'time' : 'reps',
+      defaultRestSec: r[2] === '' || r[2] == null ? null : Number(r[2]),
+      isFavorite: r[3] === true || String(r[3]).toLowerCase() === 'true',
+      note: String(r[4] == null ? '' : r[4]),
+      group: String(r[5] == null ? '' : r[5]) || 'Other'
+    };
+  });
+  return { ok: true, exercises: out };
+}
+
+// A callback turns this into JSONP, which is how the app reads the sheet
+// without fighting Apps Script's redirect and its missing CORS headers.
+function reply(obj, callback) {
+  const body = JSON.stringify(obj);
+  if (callback) {
+    return ContentService.createTextOutput(callback + '(' + body + ')')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(body).setMimeType(ContentService.MimeType.JSON);
 }`;
 
 /* ── Mount ───────────────────────────────────────────────────── */
