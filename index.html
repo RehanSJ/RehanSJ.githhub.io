@@ -144,6 +144,7 @@ function addExerciseTo(list, name, opts = {}) {
     name: clean,
     type: opts.type === 'time' ? 'time' : 'reps',
     defaultRestSec: opts.defaultRestSec != null ? Number(opts.defaultRestSec) : null,
+    unilateral: !!opts.unilateral,
     note: String(opts.note || '').trim(),
     group: opts.group || 'Other',
     isFavorite: !!opts.isFavorite,
@@ -154,6 +155,54 @@ function addExerciseTo(list, name, opts = {}) {
 
 /* Some embedded contexts block confirm() and prompt(). Degrade gracefully:
    a tapped destructive button still works, a tapped input just no-ops. */
+/* The Workouts tab's column order, in one place.
+   session_id is what makes a logged workout editable: without a key,
+   a correction can only ever be appended, never applied. */
+const WORKOUT_COLUMNS = ['date','workout','exercise','type','set','weight_kg','reps',
+  'duration_s','rpe','volume_kg','per_side','session_min','session_id'];
+
+function rowsForRecord(rec) {
+  const rows = [];
+  (rec.exercises || []).forEach(e => {
+    const isTime = (e.type || 'reps') === 'time';
+    (e.sets || []).forEach(st => {
+      const w = Number(st.weightKg) || 0;
+      const r = Number(st.reps) || 0;
+      rows.push([
+        rec.date, rec.workout, e.name, e.type || 'reps', st.set,
+        st.weightKg == null ? '' : st.weightKg,
+        isTime ? '' : (st.reps == null ? '' : st.reps),
+        isTime ? (st.durationSec == null ? '' : st.durationSec) : '',
+        st.rpe == null ? '' : st.rpe,
+        isTime ? '' : Math.round(w * r * (e.unilateral ? 2 : 1)),
+        !!e.unilateral,
+        rec.durationMin == null ? '' : rec.durationMin,
+        rec.id
+      ]);
+    });
+  });
+  return rows;
+}
+
+/* Move an item within a list. Out-of-range targets return the list
+   untouched, so the callers don't each need bounds checks. */
+function moveItem(list, from, to) {
+  if (to < 0 || to >= list.length || from === to) return list;
+  const out = list.slice();
+  const [x] = out.splice(from, 1);
+  out.splice(to, 0, x);
+  return out;
+}
+
+/* One definition of set volume, used by the session totals, the export,
+   the sheet rows and the history cards — so a unilateral set can't count
+   one way in the app and another way in the sheet. Reps are always logged
+   per side, so both sides are counted here. */
+function setVolume(entry, st) {
+  if ((entry.type || 'reps') === 'time') return 0;
+  return num(st.weight) * num(st.reps) * (entry.unilateral ? 2 : 1);
+}
+
 function sure(message) {
   try { return window.confirm(message); } catch (e) { return true; }
 }
@@ -191,6 +240,80 @@ const libraryRows = exercises => exercises.map(e => [
   e.note || '',
   e.group || 'Other'
 ]);
+
+/* Routines are stored as one row each with the item list as JSON. The
+   shape changes as features land, and a JSON blob survives that where a
+   fixed set of columns would need a migration every time. */
+const ROUTINE_COLUMNS = ['id', 'name', 'items_json', 'updated'];
+
+const routineRows = templates => templates.map(t => [
+  t.id, t.name, JSON.stringify(t.items || []), new Date().toISOString().slice(0, 10)
+]);
+
+function syncRoutinesToSheet(state) {
+  const url = (state.settings.webhookUrl || '').trim();
+  if (!url) return Promise.reject(new Error('No webhook URL set'));
+  return postWebhook(url, { action: 'syncRoutines', routines: routineRows(state.templates) });
+}
+
+async function fetchTab(url, action) {
+  const target = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'action=' + action;
+  try {
+    const r = await fetch(target);
+    if (r.ok) return await r.json();
+  } catch (e) { /* fall through to JSONP */ }
+  return jsonp(target);
+}
+
+/* Rebuild history records from flat sheet rows. Rows are grouped by
+   session_id, falling back to date+workout for anything logged before
+   session ids existed. */
+function recordsFromRows(rows) {
+  const byId = new Map();
+  rows.forEach(r => {
+    const key = String(r.session_id || `${r.date}|${r.workout}`);
+    if (!byId.has(key)) {
+      byId.set(key, {
+        id: key, date: r.date, workout: r.workout,
+        durationMin: r.session_min === '' || r.session_min == null ? null : Number(r.session_min),
+        exercises: new Map()
+      });
+    }
+    const rec = byId.get(key);
+    if (!rec.exercises.has(r.exercise)) {
+      rec.exercises.set(r.exercise, {
+        name: r.exercise, type: r.type === 'time' ? 'time' : 'reps',
+        unilateral: r.per_side === true || String(r.per_side).toLowerCase() === 'true',
+        sets: []
+      });
+    }
+    const ex = rec.exercises.get(r.exercise);
+    ex.sets.push({
+      set: Number(r.set) || ex.sets.length + 1,
+      weightKg: r.weight_kg === '' || r.weight_kg == null ? 0 : Number(r.weight_kg),
+      reps: r.reps === '' || r.reps == null ? null : Number(r.reps),
+      durationSec: r.duration_s === '' || r.duration_s == null ? null : Number(r.duration_s),
+      rpe: r.rpe === '' || r.rpe == null ? null : Number(r.rpe),
+      perSide: r.per_side === true || String(r.per_side).toLowerCase() === 'true'
+    });
+  });
+
+  return Array.from(byId.values()).map(rec => {
+    const exercises = Array.from(rec.exercises.values()).map(e => ({
+      ...e,
+      volumeKg: Math.round(e.sets.reduce((a, st) =>
+        a + (e.type === 'time' ? 0 : (st.weightKg || 0) * (st.reps || 0) * (e.unilateral ? 2 : 1)), 0)),
+      timeSec: Math.round(e.sets.reduce((a, st) => a + (e.type === 'time' ? (st.durationSec || 0) : 0), 0))
+    }));
+    return {
+      app: 'IronDesk', version: 3, id: rec.id, date: rec.date, workout: rec.workout,
+      durationMin: rec.durationMin,
+      totalVolumeKg: exercises.reduce((a, e) => a + e.volumeKg, 0),
+      totalTimeSec: exercises.reduce((a, e) => a + e.timeSec, 0),
+      exercises
+    };
+  }).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
 
 /* Maps the library into 2D rows and posts them to the webhook. Resolves
    with the script's reply where the browser lets us read it. */
@@ -230,14 +353,7 @@ function jsonp(url, timeoutMs = 15000) {
   });
 }
 
-async function fetchLibrary(url) {
-  const target = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'action=library';
-  try {
-    const r = await fetch(target);
-    if (r.ok) return await r.json();
-  } catch (e) { /* fall through to JSONP */ }
-  return jsonp(target);
-}
+function fetchLibrary(url) { return fetchTab(url, 'library'); }
 
 /* ── Audio: a short two-tone chime, built on the fly ──────────── */
 let ac = null;
@@ -315,7 +431,7 @@ const CATALOGUE = [
     { n: 'Seated Machine Shoulder Press', t: 'reps', r: 120, note: 'Back on the pad, ribs down. Stop at ear level on the way down' },
     { n: 'Seated Dumbbell Shoulder Press', t: 'reps', r: 120, note: 'Ribs down, stop at ears. Press up and slightly in' },
     { n: 'Arnold Press',             t: 'reps', r: 120, note: 'Rotate as you press. Go light — the rotation under load is the hard part' },
-    { n: 'Landmine Press',           t: 'reps', r: 120, note: 'The 45° path most cranky shoulders tolerate. Neutral grip, ribs down' },
+    { n: 'Landmine Press',           t: 'reps', r: 120, uni: true, note: 'The 45° path most cranky shoulders tolerate. Neutral grip, ribs down' },
     { n: 'Dumbbell Lateral Raise',   t: 'reps', r: 60,  note: 'Light and strict. Lead with the elbow, stop at shoulder height' },
     { n: 'Cable Lateral Raise',      t: 'reps', r: 75,  note: 'Lead with elbow, no swing. Constant tension through the bottom' },
     { n: 'Machine Lateral Raise',    t: 'reps', r: 60,  note: 'Pad against the outer arm, not the forearm. Pause at the top' },
@@ -335,8 +451,8 @@ const CATALOGUE = [
     { n: 'Chin-Up',                  t: 'reps', r: 150, note: 'Supinated grip, more biceps. Ribs down at the top — don’t arch to finish' },
     { n: 'Chest-Supported Row',      t: 'reps', r: 120, note: 'Chest never leaves the pad — that pad is the safety mechanism' },
     { n: 'Seated Cable Row',         t: 'reps', r: 90,  note: 'Torso vertical, no rocking. Let the blades protract fully at the front' },
-    { n: 'Single-Arm Cable Row',     t: 'reps', r: 90,  note: 'Let the blade travel forward at the stretch. Torso doesn’t rotate' },
-    { n: 'Dumbbell Row',             t: 'reps', r: 90,  note: 'Hand and knee on the bench. Pull to the hip, not the shoulder' },
+    { n: 'Single-Arm Cable Row',     t: 'reps', r: 90,  uni: true, note: 'Let the blade travel forward at the stretch. Torso doesn’t rotate' },
+    { n: 'Dumbbell Row',             t: 'reps', r: 90,  uni: true, note: 'Hand and knee on the bench. Pull to the hip, not the shoulder' },
     { n: 'T-Bar Row',                t: 'reps', r: 150, note: 'Use the chest-supported version if your lower back is the limiter' },
     { n: 'Machine High Row',         t: 'reps', r: 90,  note: 'Pull down and back. Great lat isolation with zero lower-back cost' },
     { n: 'Straight-Arm Pulldown',    t: 'reps', r: 75,  note: 'Arms stay long. Pure lat work, no biceps' },
@@ -356,9 +472,9 @@ const CATALOGUE = [
     { n: 'Goblet Squat',             t: 'reps', r: 120, note: 'Front load keeps the torso upright for you. Elbows inside the knees' },
     { n: 'Front Squat',              t: 'reps', r: 180, note: 'Elbows high throughout. The moment they drop, the bar rolls — rack it' },
     { n: 'Leg Press',                t: 'reps', r: 150, note: 'Lower back flat on the pad. Stop lowering the instant the pelvis lifts off' },
-    { n: 'Bulgarian Split Squat',    t: 'reps', r: 90,  note: 'Front shin near vertical, back knee travels down. Weak leg goes first' },
-    { n: 'Walking Lunge',            t: 'reps', r: 90,  note: 'Step long for glutes, short for quads. Torso upright' },
-    { n: 'Step-Up',                  t: 'reps', r: 90,  note: 'Drive through the top foot. Don’t push off the trailing toe' },
+    { n: 'Bulgarian Split Squat',    t: 'reps', r: 90,  uni: true, note: 'Front shin near vertical, back knee travels down. Weak leg goes first' },
+    { n: 'Walking Lunge',            t: 'reps', r: 90,  uni: true, note: 'Step long for glutes, short for quads. Torso upright' },
+    { n: 'Step-Up',                  t: 'reps', r: 90,  uni: true, note: 'Drive through the top foot. Don’t push off the trailing toe' },
     { n: 'Leg Extension',            t: 'reps', r: 75,  note: 'Squeeze 1s at the top. Reduce range if the kneecap complains' },
     { n: 'Seated Leg Curl',          t: 'reps', r: 90,  note: 'Hips strapped down. 3s controlled return' },
     { n: 'Lying Leg Curl',           t: 'reps', r: 90,  note: 'Hips stay on the pad — lifting them is the cheat to watch for' },
@@ -374,7 +490,7 @@ const CATALOGUE = [
 
   { group: 'Core', items: [
     { n: 'Plank',                    t: 'time', r: 45, note: 'Glutes squeezed, ribs down, straight line ear to ankle' },
-    { n: 'Side Plank',               t: 'time', r: 45, note: 'Stack the hips. Push the floor away from the bottom shoulder' },
+    { n: 'Side Plank',               t: 'time', r: 45, uni: true, note: 'Stack the hips. Push the floor away from the bottom shoulder' },
     { n: 'Hollow Body Hold',         t: 'time', r: 60, note: 'Lower back pressed into the floor. Lower the legs only as far as that stays true' },
     { n: 'Cable Crunch',             t: 'reps', r: 60, note: 'Ribs to pelvis — this is spinal flexion, not a hip hinge. Exhale hard at the bottom' },
     { n: 'Hanging Knee Raise',       t: 'reps', r: 75, note: 'Curl the pelvis up at the top. Stop swinging before the next rep' },
@@ -382,39 +498,39 @@ const CATALOGUE = [
     { n: 'Pallof Press',             t: 'reps', r: 45, note: 'Resist the rotation — that’s the whole exercise. Ribs down' },
     { n: 'Ab Wheel Rollout',         t: 'reps', r: 90, note: 'From the knees. Stop the moment the lower back starts to arch' },
     { n: 'Farmer’s Carry',           t: 'time', r: 90, note: 'Tall posture, shoulders back. Don’t lean away from the load' },
-    { n: 'Suitcase Carry',           t: 'time', r: 90, note: 'One side only. Stay perfectly upright — the anti-lean is the point' },
+    { n: 'Suitcase Carry',           t: 'time', r: 90, uni: true, note: 'One side only. Stay perfectly upright — the anti-lean is the point' },
   ]},
 
   { group: 'Yoga', items: [
     { n: 'Downward Dog',             t: 'time', r: 20, note: 'Hips high, knees can bend. Long spine matters more than straight legs' },
     { n: 'Child’s Pose',             t: 'time', r: 20, note: 'Knees wide, hips to heels, arms long. Breathe into the back of the ribs' },
     { n: 'Cobra',                    t: 'time', r: 20, note: 'Elbows soft, shoulders down. Lengthen forward — don’t crank the lower back' },
-    { n: 'Low Lunge (Anjaneyasana)', t: 'time', r: 20, note: 'Back knee down, tuck the tailbone. You should feel the front of the back hip' },
-    { n: 'Pigeon Pose',              t: 'time', r: 20, note: 'Front shin angled, hips square. Prop the hip on a block if it hovers' },
-    { n: 'Warrior II',               t: 'time', r: 20, note: 'Front knee over the ankle, torso stacked over the hips. Relax the shoulders' },
-    { n: 'Triangle Pose',            t: 'time', r: 20, note: 'Hinge sideways from the hip, not the waist. Chest open to the side wall' },
+    { n: 'Low Lunge (Anjaneyasana)', t: 'time', r: 20, uni: true, note: 'Back knee down, tuck the tailbone. You should feel the front of the back hip' },
+    { n: 'Pigeon Pose',              t: 'time', r: 20, uni: true, note: 'Front shin angled, hips square. Prop the hip on a block if it hovers' },
+    { n: 'Warrior II',               t: 'time', r: 20, uni: true, note: 'Front knee over the ankle, torso stacked over the hips. Relax the shoulders' },
+    { n: 'Triangle Pose',            t: 'time', r: 20, uni: true, note: 'Hinge sideways from the hip, not the waist. Chest open to the side wall' },
     { n: 'Chair Pose',               t: 'time', r: 30, note: 'Weight in the heels, ribs down. Legs burn, lower back stays quiet' },
     { n: 'Bridge Pose',              t: 'time', r: 20, note: 'Feet hip-width, press through the heels. Glutes lift you, not the spine' },
     { n: 'Seated Forward Fold',      t: 'time', r: 20, note: 'Hinge from the hips with a long spine. Bend the knees rather than round the back' },
     { n: 'Supine Twist',             t: 'time', r: 20, note: 'Both shoulders stay down. Let gravity do it — never force the knee lower' },
-    { n: 'Thread the Needle',        t: 'time', r: 20, note: 'Opens the mid-back. Sink the shoulder toward the mat, breathe wide' },
+    { n: 'Thread the Needle',        t: 'time', r: 20, uni: true, note: 'Opens the mid-back. Sink the shoulder toward the mat, breathe wide' },
     { n: 'Happy Baby',               t: 'time', r: 20, note: 'Hold the outside edges of the feet, shins vertical. Lower back stays on the mat' },
     { n: 'Legs Up the Wall',         t: 'time', r: 20, note: 'Best 5 minutes after a leg session. Nothing to achieve — just breathe' },
-    { n: 'Tree Pose',                t: 'time', r: 20, note: 'Foot above or below the knee, never on it. Fix your eyes on one spot' },
+    { n: 'Tree Pose',                t: 'time', r: 20, uni: true, note: 'Foot above or below the knee, never on it. Fix your eyes on one spot' },
     { n: 'Corpse Pose (Savasana)',   t: 'time', r: 20, note: 'Flat on your back, palms up. Two minutes minimum to be worth anything' },
   ]},
 
   { group: 'Stretch', items: [
-    { n: 'Couch Stretch',            t: 'time', r: 20, note: 'Back foot up on a bench, tailbone tucked. The best hip flexor stretch there is' },
-    { n: 'Standing Hamstring Stretch', t: 'time', r: 20, note: 'Heel on a low box, hinge from the hip with a flat back' },
-    { n: 'Doorway Pec Stretch',      t: 'time', r: 20, note: 'Forearm on the frame, elbow at shoulder height. Rotate away, don’t lunge through' },
+    { n: 'Couch Stretch',            t: 'time', r: 20, uni: true, note: 'Back foot up on a bench, tailbone tucked. The best hip flexor stretch there is' },
+    { n: 'Standing Hamstring Stretch', t: 'time', r: 20, uni: true, note: 'Heel on a low box, hinge from the hip with a flat back' },
+    { n: 'Doorway Pec Stretch',      t: 'time', r: 20, uni: true, note: 'Forearm on the frame, elbow at shoulder height. Rotate away, don’t lunge through' },
     { n: 'Lat Stretch on Rack',      t: 'time', r: 20, note: 'Hands on the rack, hips back, chest sinks. Breathe into the armpit' },
-    { n: '90/90 Hip Stretch',        t: 'time', r: 20, note: 'Sit tall first, then lean over the front shin. Chest leads' },
-    { n: 'Seated Figure-4',          t: 'time', r: 20, note: 'Ankle over the opposite knee, hinge forward. Targets the glute' },
-    { n: 'Calf Stretch on Step',     t: 'time', r: 20, note: 'Straight knee for the gastroc, bent knee for the soleus. Do both' },
-    { n: 'Quad Stretch',             t: 'time', r: 20, note: 'Tuck the tailbone before you pull the heel in, or you just arch the back' },
+    { n: '90/90 Hip Stretch',        t: 'time', r: 20, uni: true, note: 'Sit tall first, then lean over the front shin. Chest leads' },
+    { n: 'Seated Figure-4',          t: 'time', r: 20, uni: true, note: 'Ankle over the opposite knee, hinge forward. Targets the glute' },
+    { n: 'Calf Stretch on Step',     t: 'time', r: 20, uni: true, note: 'Straight knee for the gastroc, bent knee for the soleus. Do both' },
+    { n: 'Quad Stretch',             t: 'time', r: 20, uni: true, note: 'Tuck the tailbone before you pull the heel in, or you just arch the back' },
     { n: 'Wrist Flexor Stretch',     t: 'time', r: 20, note: 'Worth doing after any heavy pulling day' },
-    { n: 'Neck Side Bend',           t: 'time', r: 20, note: 'Gentle. Let the head fall — never pull hard on your own neck' },
+    { n: 'Neck Side Bend',           t: 'time', r: 20, uni: true, note: 'Gentle. Let the head fall — never pull hard on your own neck' },
   ]},
 ];
 
@@ -474,13 +590,14 @@ const EXERCISE_GROUPS = CATALOGUE.map(c => c.group);
 
 /* Bump this whenever the catalogue gains movements, so existing installs
    pick them up on next load. */
-const CATALOGUE_VERSION = 2;
+const CATALOGUE_VERSION = 3;
 
 const SEED_EXERCISES = (() => {
   let list = [];
   CATALOGUE.forEach(c => c.items.forEach(it => {
     list = addExerciseTo(list, it.n, {
-      type: it.t, defaultRestSec: it.r, note: it.note, group: c.group, custom: false
+      type: it.t, defaultRestSec: it.r, note: it.note, group: c.group,
+      unilateral: !!it.uni, custom: false
     }).list;
   }));
   return list;
@@ -507,7 +624,8 @@ function syncCatalogue(list) {
     const ex = findExercise(out, it.n);
     if (!ex) {
       out = addExerciseTo(out, it.n, {
-        type: it.t, defaultRestSec: it.r, note: it.note, group: c.group, custom: false
+        type: it.t, defaultRestSec: it.r, note: it.note, group: c.group,
+        unilateral: !!it.uni, custom: false
       }).list;
       return;
     }
@@ -515,6 +633,7 @@ function syncCatalogue(list) {
     if (!ex.note) fill.note = it.note;
     if (ex.defaultRestSec == null) fill.defaultRestSec = it.r;
     if (!ex.group || ex.group === 'Other') fill.group = c.group;
+    if (it.uni && !ex.unilateral) fill.unilateral = true;
     if (Object.keys(fill).length) out = out.map(x => x.id === ex.id ? { ...x, ...fill } : x);
   }));
   return out;
@@ -525,7 +644,8 @@ function migrate(d) {
   const s = { ...DEFAULT_STATE, ...d };
   s.settings = { ...DEFAULT_STATE.settings, ...(d.settings || {}) };
   s.exercises = (d.exercises || []).map(e => ({
-    type: 'reps', isFavorite: false, custom: true, defaultRestSec: null, note: '', group: 'Other', ...e
+    type: 'reps', isFavorite: false, custom: true, defaultRestSec: null,
+    unilateral: false, note: '', group: 'Other', ...e
   }));
 
   /* Run the merge once per catalogue release. Gating on a version stamp
@@ -575,11 +695,18 @@ function noteFor(item, library) {
   return ex && ex.note ? ex.note : '';
 }
 
+function uniFor(item, library) {
+  if (item.unilateral != null) return !!item.unilateral;
+  const ex = findExercise(library, item.name);
+  return !!(ex && ex.unilateral);
+}
+
 function entriesFromItems(items, settings, library = []) {
   return items.map(it => ({
     id: uid(),
     name: it.name,
     type: it.type === 'time' ? 'time' : 'reps',
+    unilateral: uniFor(it, library),
     restSec: restFor(it, library, settings.defaultRest),
     repRange: it.repRange || '',
     targetSec: it.targetSec || null,
@@ -700,6 +827,23 @@ function App() {
     const id = setTimeout(() => {
       libSig.current = sig;
       syncLibraryToSheet(state).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(id);
+  }, [state]);
+
+  /* Same treatment for routines, so an edit or a reorder is backed up
+     without you having to remember to push it. */
+  const tplSig = useRef(null);
+  useEffect(() => {
+    if (!state) return;
+    const url = state.settings.webhookUrl.trim();
+    const sig = JSON.stringify(state.templates.map(t => [t.id, t.name, t.items]));
+    if (tplSig.current === null) { tplSig.current = sig; return; }
+    if (tplSig.current === sig) return;
+    if (!url || !state.settings.syncLibrary) { tplSig.current = sig; return; }
+    const id = setTimeout(() => {
+      tplSig.current = sig;
+      syncRoutinesToSheet(state).catch(() => {});
     }, 2500);
     return () => clearTimeout(id);
   }, [state]);
@@ -1120,9 +1264,8 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
   }
 
   /* ── Active session ──────────────────────────────────────── */
-  const isRepSet = (e, st) => e.type !== 'time';
   const totalVolume = s.entries.reduce((sum, e) =>
-    sum + e.sets.reduce((a, st) => a + (st.done && isRepSet(e, st) ? num(st.weight) * num(st.reps) : 0), 0), 0);
+    sum + e.sets.reduce((a, st) => a + (st.done ? setVolume(e, st) : 0), 0), 0);
   const totalTime = s.entries.reduce((sum, e) =>
     sum + e.sets.reduce((a, st) => a + (st.done && e.type === 'time' ? num(st.duration) : 0), 0), 0);
   const doneSets = s.entries.reduce((a, e) => a + e.sets.filter(x => x.done).length, 0);
@@ -1130,9 +1273,11 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
   const elapsed = Math.floor((Date.now() - s.startedAt) / 60000);
 
   const buildExport = () => ({
-    app: 'IronDesk', version: 2,
+    app: 'IronDesk', version: 3,
+    id: s.id,
     date: today(),
     workout: s.name,
+    startedAt: s.startedAt,
     durationMin: elapsed,
     totalVolumeKg: Math.round(totalVolume),
     totalTimeSec: Math.round(totalTime),
@@ -1140,38 +1285,23 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
       name: e.name,
       type: e.type || 'reps',
       repRange: e.repRange || null,
-      volumeKg: Math.round(e.sets.reduce((a, st) => a + (st.done && e.type !== 'time' ? num(st.weight) * num(st.reps) : 0), 0)),
+      unilateral: !!e.unilateral,
+      volumeKg: Math.round(e.sets.reduce((a, st) => a + (st.done ? setVolume(e, st) : 0), 0)),
       timeSec: Math.round(e.sets.reduce((a, st) => a + (st.done && e.type === 'time' ? num(st.duration) : 0), 0)),
       sets: e.sets.filter(x => x.done).map((st, i) => ({
         set: i + 1,
         weightKg: num(st.weight),
         reps: e.type === 'time' ? null : num(st.reps),
+        perSide: !!e.unilateral,
         durationSec: e.type === 'time' ? num(st.duration) : null,
         rpe: st.rpe ? num(st.rpe) : null
       }))
     })).filter(e => e.sets.length > 0)
   });
 
-  const buildRows = () => {
-    const rows = [];
-    s.entries.forEach(e => {
-      e.sets.forEach((st, i) => {
-        if (!st.done) return;
-        const isTime = e.type === 'time';
-        // Form cues stay in the app. They're identical on every row, so
-        // writing them to the sheet is pure noise.
-        rows.push([
-          today(), s.name, e.name, e.type || 'reps', i + 1,
-          num(st.weight),
-          isTime ? '' : num(st.reps),
-          isTime ? num(st.duration) : '',
-          st.rpe ? num(st.rpe) : '',
-          isTime ? '' : Math.round(num(st.weight) * num(st.reps))
-        ]);
-      });
-    });
-    return rows;
-  };
+  // Form cues stay in the app — identical on every row, so writing them
+  // to the sheet is pure noise.
+  const buildRows = () => rowsForRecord(buildExport());
 
   const exportJSON = () => {
     copyText(JSON.stringify(buildExport(), null, 2)).then(() => say('Workout JSON copied. Paste it to Claude.'));
@@ -1183,29 +1313,21 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
     const rows = buildRows();
     if (rows.length === 0) { if (!silent) say('No completed sets to send.'); return false; }
     try {
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },  // avoids a CORS preflight
-        body: JSON.stringify({ rows })
-      });
+      // replaceSession is idempotent: re-sending a session overwrites its
+      // rows instead of appending a second copy.
+      await postWebhook(url, { action: 'replaceSession', sessionId: s.id, rows });
       if (!silent) say(`Sent ${rows.length} rows to your sheet`);
       return true;
     } catch (err) {
-      try {
-        await fetch(url, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ rows }) });
-        if (!silent) say(`Sent ${rows.length} rows (delivery unconfirmed)`);
-        return true;
-      } catch (e2) {
-        if (!silent) say("Couldn't reach the sheet. Check the URL and your connection.");
-        return false;
-      }
+      if (!silent) say("Couldn't reach the sheet. Check the URL and your connection.");
+      return false;
     }
   };
 
   const finish = async () => {
     if (doneSets === 0) { say('Tick at least one set before finishing.'); return; }
     if (state.settings.autoSync && state.settings.webhookUrl.trim()) await pushToSheet(true);
-    const record = { ...buildExport(), id: s.id, finishedAt: Date.now() };
+    const record = { ...buildExport(), finishedAt: Date.now() };
     setState(p => ({ ...p, history: [record, ...p.history].slice(0, 200), session: null }));
     say('Workout saved');
     setTab('history');
@@ -1238,6 +1360,10 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
             onRemove={() => setSession(x => ({ ...x, entries: x.entries.filter((_, i) => i !== ei) }))}
             onRest={() => startRest(e.restSec || state.settings.defaultRest, e.name)}
             openDial={openDial}
+            say={say}
+            onMove={d => setSession(x => ({ ...x, entries: moveItem(x.entries, ei, ei + d) }))}
+            isFirst={ei === 0}
+            isLast={ei === s.entries.length - 1}
           />
         ))}
       </div>
@@ -1280,7 +1406,7 @@ function LogView({ state, setState, say, startRest, openDial, setTab }) {
 }
 
 /* ── One exercise, with its sets ─────────────────────────────── */
-function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) {
+function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial, onMove, isFirst, isLast, say }) {
   const [open, setOpen] = useState(true);
   const isTime = entry.type === 'time';
   const scrollRef = useRef(null);
@@ -1328,8 +1454,39 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
       return `${dur(b.durationSec || 0)} · ${prior.date}`;
     }
     const b = prior.sets.reduce((a, x) => (x.weightKg > a.weightKg ? x : a));
-    return `${b.weightKg} kg × ${b.reps} · ${prior.date}`;
+    return `${b.weightKg} kg × ${b.reps}${b.rpe ? ` @${b.rpe}` : ''} · ${prior.date}`;
   }, [prior]);
+
+  /* What to do this week, read off last week's RPE. Deliberately
+     conservative: it only proposes a jump when the last session was
+     genuinely submaximal, and it never proposes one from missing RPE,
+     because "no RPE logged" is not evidence that the set was easy. */
+  const suggestion = useMemo(() => {
+    if (!prior || prior.type === 'time') return null;
+    const top = prior.sets.reduce((a, x) => (x.weightKg > a.weightKg ? x : a));
+    const w = Number(top.weightKg) || 0;
+    const reps = Number(top.reps) || 0;
+    const rpe = top.rpe == null || top.rpe === '' ? null : Number(top.rpe);
+    if (!w) return null;
+    if (rpe == null) return { weight: w, reps, label: `Repeat ${w} kg × ${reps}`, why: 'No RPE logged last time — match it and rate this one' };
+    if (rpe <= 7) {
+      // Round to the nearest 2.5 kg so it's actually loadable on a stack.
+      const next = Math.round((w * 1.025) / 2.5) * 2.5;
+      const bumped = next > w ? next : w + 2.5;
+      return { weight: bumped, reps, label: `Try ${bumped} kg × ${reps}`, why: `Last set was RPE ${rpe} — room to add load` };
+    }
+    if (rpe <= 8.5) return { weight: w, reps: reps + 1, label: `Try ${w} kg × ${reps + 1}`, why: `RPE ${rpe} last time — hold the weight, chase a rep` };
+    return { weight: w, reps, label: `Hold ${w} kg × ${reps}`, why: `RPE ${rpe} was near failure — repeat before adding` };
+  }, [prior]);
+
+  const applySuggestion = () => {
+    if (!suggestion) return;
+    onChange(e => ({
+      ...e,
+      sets: e.sets.map(st => st.done ? st : { ...st, weight: String(suggestion.weight), reps: String(suggestion.reps) })
+    }));
+    if (say) say('Filled from last session');
+  };
 
   // Ghosted in the empty field, so last session's number is right where
   // you're about to type this session's.
@@ -1365,15 +1522,25 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
 
   return (
     <section className={`bg-panel border rounded-2xl overflow-hidden ${allDone ? 'border-ok/30' : 'border-line'}`}>
+      <div className="flex items-stretch">
+        <div className="flex flex-col justify-center pl-1.5 py-1 gap-0.5">
+          <button onClick={() => onMove && onMove(-1)} disabled={isFirst}
+            aria-label={`Move ${entry.name} up`}
+            className="w-7 h-6 rounded text-muted text-[11px] leading-none disabled:opacity-20 active:bg-raise">▲</button>
+          <button onClick={() => onMove && onMove(1)} disabled={isLast}
+            aria-label={`Move ${entry.name} down`}
+            className="w-7 h-6 rounded text-muted text-[11px] leading-none disabled:opacity-20 active:bg-raise">▼</button>
+        </div>
       <button onClick={() => setOpen(o => !o)}
         aria-expanded={open}
-        className="w-full px-4 py-3 flex items-center gap-3 text-left active:bg-raise">
+        className="flex-1 min-w-0 pr-4 pl-2 py-3 flex items-center gap-3 text-left active:bg-raise">
         <span className="flex-1 min-w-0">
           <span className="block font-semibold leading-tight truncate">{entry.name}</span>
           <span className="block text-[11px] text-muted num mt-0.5 truncate">
             {!open && doneCount > 0 ? summary : (
               <>
                 {doneCount}/{entry.sets.length} sets
+                {entry.unilateral ? ' · per side' : ''}
                 {isTime
                   ? (entry.targetSec ? ` · target ${dur(entry.targetSec)}` : '')
                   : (entry.repRange ? ` · target ${entry.repRange}` : '')}
@@ -1386,6 +1553,7 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
           {allDone ? (open ? 'done ▾' : 'done ▸') : (open ? '▾' : '▸')}
         </span>
       </button>
+      </div>
 
       {open && (
         <div className="px-3 pb-4">
@@ -1405,14 +1573,27 @@ function ExerciseCard({ entry, history, onChange, onRemove, onRest, openDial }) 
                 className="num w-9 bg-transparent text-center text-[13px] text-txt focus:outline-none" />
               <span className="text-[11px] text-muted">s</span>
             </label>
+            <button onClick={() => onChange(e => ({ ...e, unilateral: !e.unilateral }))}
+              aria-pressed={!!entry.unilateral}
+              className={`rounded-lg px-2 py-1.5 text-[11px] border ${entry.unilateral ? 'border-amber text-amber' : 'border-line text-muted'}`}>
+              per side
+            </button>
             {best && <span className="text-[11px] text-muted num truncate ml-auto">Last: {best}</span>}
           </div>
+
+          {suggestion && !allDone && (
+            <button onClick={applySuggestion}
+              className="w-full mb-3 text-left bg-raise border border-amber/30 rounded-xl px-3 py-2 active:bg-line">
+              <span className="block text-[13px] text-amber num">{suggestion.label}</span>
+              <span className="block text-[11px] text-muted mt-0.5">{suggestion.why} · tap to fill</span>
+            </button>
+          )}
 
           <div ref={scrollRef} className="set-scroll">
             <div className="set-grid text-[10px] uppercase tracking-wider text-muted mb-1.5">
               <span className="set-pin text-center">#</span>
               <span className="text-center">kg</span>
-              <span className="text-center">{isTime ? 'secs' : 'reps'}</span>
+              <span className="text-center">{isTime ? 'secs' : (entry.unilateral ? 'reps/sd' : 'reps')}</span>
               <span className="text-center">{isTime ? '⏱' : 'rpe'}</span>
               <span></span>
             </div>
@@ -1612,11 +1793,14 @@ function TemplatesView({ state, setState, say, setTab }) {
         const lib = findExercise(state.exercises, e.name);
         const sameRest = lib && lib.defaultRestSec != null && Number(lib.defaultRestSec) === Number(e.restSec);
         const sameNote = lib && lib.note === (e.note || '');
+        const sameUni = lib && !!lib.unilateral === !!e.unilateral;
         return {
           name: e.name, type: e.type || 'reps', sets: e.sets.length,
-          repRange: e.repRange || '', targetSec: e.targetSec || (e.type === 'time' ? num(e.sets[0]?.duration) || null : null),
+          repRange: e.repRange || '',
+          targetSec: e.targetSec || (e.type === 'time' ? num(e.sets[0]?.duration) || null : null),
           restSec: sameRest ? null : e.restSec,
-          note: sameNote ? '' : (e.note || '')
+          note: sameNote ? '' : (e.note || ''),
+          unilateral: sameUni ? null : !!e.unilateral
         };
       })
     };
@@ -1624,55 +1808,128 @@ function TemplatesView({ state, setState, say, setTab }) {
     say('Routine saved');
   };
 
+  const patchTpl = (id, fn) => setState(p => ({
+    ...p, templates: p.templates.map(t => t.id === id ? fn(t) : t)
+  }));
+
+  const patchItem = (tid, idx, fields) => patchTpl(tid, t => ({
+    ...t, items: t.items.map((it, i) => i === idx ? { ...it, ...fields } : it)
+  }));
+
   return (
     <div>
       <h1 className="text-2xl font-bold mb-1">Routines</h1>
-      <p className="text-muted text-sm mb-5">Your four training days, ready to load.</p>
+      <p className="text-muted text-sm mb-5">Tap Edit to rename, reorder, retarget or remove exercises.</p>
 
       <div className="space-y-3">
-        {state.templates.map(t => (
-          <div key={t.id} className="bg-panel border border-line rounded-2xl p-4">
-            <div className="flex justify-between items-start gap-3">
-              <div className="min-w-0">
-                <div className="font-semibold">{t.name}</div>
-                <div className="text-[12px] text-muted num mt-0.5">
-                  {t.items.length} exercises · {t.items.reduce((a, b) => a + (b.sets || 0), 0)} sets
+        {state.templates.map(t => {
+          const open = editing === t.id;
+          return (
+            <div key={t.id} className="bg-panel border border-line rounded-2xl p-4">
+              <div className="flex justify-between items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  {open ? (
+                    <input value={t.name} onChange={e => patchTpl(t.id, x => ({ ...x, name: e.target.value }))}
+                      aria-label="Routine name"
+                      className="bg-transparent font-semibold w-full focus:outline-none focus:text-amber" />
+                  ) : (
+                    <div className="font-semibold truncate">{t.name}</div>
+                  )}
+                  <div className="text-[12px] text-muted num mt-0.5">
+                    {t.items.length} exercises · {t.items.reduce((a, b) => a + (b.sets || 0), 0)} sets
+                  </div>
                 </div>
+                <button onClick={() => setEditing(open ? null : t.id)} className="text-muted text-[12px] px-2 shrink-0">
+                  {open ? 'Done' : 'Edit'}
+                </button>
               </div>
-              <button onClick={() => setEditing(editing === t.id ? null : t.id)} className="text-muted text-[12px] px-2">
-                {editing === t.id ? 'Hide' : 'View'}
-              </button>
-            </div>
 
-            {editing === t.id && (
-              <ul className="mt-3 space-y-1.5 border-t border-line pt-3">
-                {t.items.map((it, i) => (
-                  <li key={i} className="text-[13px] flex justify-between gap-3">
-                    <span className="truncate">{it.name}</span>
-                    <span className="num text-muted whitespace-nowrap">
-                      {it.sets}×{it.type === 'time' ? dur(it.targetSec || 0) : it.repRange}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
+              {open && (
+                <ul className="mt-3 space-y-2 border-t border-line pt-3">
+                  {t.items.map((it, i) => (
+                    <li key={i} className="bg-raise border border-line rounded-xl p-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="flex flex-col gap-0.5 shrink-0">
+                          <button onClick={() => patchTpl(t.id, x => ({ ...x, items: moveItem(x.items, i, i - 1) }))}
+                            disabled={i === 0} aria-label={`Move ${it.name} up`}
+                            className="w-6 h-5 rounded text-muted text-[10px] leading-none disabled:opacity-20 active:bg-line">▲</button>
+                          <button onClick={() => patchTpl(t.id, x => ({ ...x, items: moveItem(x.items, i, i + 1) }))}
+                            disabled={i === t.items.length - 1} aria-label={`Move ${it.name} down`}
+                            className="w-6 h-5 rounded text-muted text-[10px] leading-none disabled:opacity-20 active:bg-line">▼</button>
+                        </div>
+                        <span className="text-[13px] flex-1 min-w-0 truncate">{it.name}</span>
+                        <button onClick={() => patchTpl(t.id, x => ({ ...x, items: x.items.filter((_, j) => j !== i) }))}
+                          aria-label={`Remove ${it.name}`}
+                          className="text-bad text-lg leading-none px-1.5 shrink-0">×</button>
+                      </div>
 
-            <div className="grid grid-cols-2 gap-2 mt-3">
-              <button
-                onClick={() => {
-                  setState(p => ({
-                    ...p,
-                    session: { id: uid(), name: t.name, startedAt: Date.now(), entries: entriesFromItems(t.items, p.settings, p.exercises) }
-                  }));
-                  setTab('log');
-                }}
-                className="bg-amber text-ink font-semibold rounded-xl py-3">Start</button>
-              <button
-                onClick={() => { if (sure(`Delete ${t.name}?`)) setState(p => ({ ...p, templates: p.templates.filter(x => x.id !== t.id) })); }}
-                className="text-bad border border-bad/30 rounded-xl py-3 text-[14px]">Delete</button>
+                      <div className="flex items-center gap-2 mt-2 pl-8 flex-wrap">
+                        <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+                          <span className="text-[10px] uppercase tracking-wider text-muted">sets</span>
+                          <input inputMode="numeric" value={it.sets}
+                            onChange={e => patchItem(t.id, i, { sets: Math.max(1, num(e.target.value)) })}
+                            aria-label={`Sets for ${it.name}`}
+                            className="num w-8 bg-transparent text-center text-[13px] text-txt focus:outline-none" />
+                        </label>
+                        {it.type === 'time' ? (
+                          <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+                            <span className="text-[10px] uppercase tracking-wider text-muted">secs</span>
+                            <input inputMode="numeric" value={it.targetSec || ''}
+                              onChange={e => patchItem(t.id, i, { targetSec: num(e.target.value) || null })}
+                              aria-label={`Target seconds for ${it.name}`}
+                              className="num w-10 bg-transparent text-center text-[13px] text-txt focus:outline-none" />
+                          </label>
+                        ) : (
+                          <label className="flex items-center gap-1 bg-ink border border-line rounded-lg pl-2 pr-1.5 py-1">
+                            <span className="text-[10px] uppercase tracking-wider text-muted">reps</span>
+                            <input value={it.repRange || ''} placeholder="8-12"
+                              onChange={e => patchItem(t.id, i, { repRange: e.target.value })}
+                              aria-label={`Rep range for ${it.name}`}
+                              className="num w-12 bg-transparent text-center text-[13px] text-txt placeholder-muted/40 focus:outline-none" />
+                          </label>
+                        )}
+                        <span className="num text-[11px] text-muted">
+                          rest {restFor(it, state.exercises, state.settings.defaultRest)}s
+                        </span>
+                        {uniFor(it, state.exercises) && <span className="text-[11px] text-amber">per side</span>}
+                      </div>
+                    </li>
+                  ))}
+                  {t.items.length === 0 && <p className="text-muted text-sm">No exercises left in this routine.</p>}
+                </ul>
+              )}
+
+              {!open && (
+                <ul className="mt-3 space-y-1.5 border-t border-line pt-3">
+                  {t.items.map((it, i) => (
+                    <li key={i} className="text-[13px] flex justify-between gap-3">
+                      <span className="truncate">{i + 1}. {it.name}</span>
+                      <span className="num text-muted whitespace-nowrap">
+                        {it.sets}×{it.type === 'time' ? dur(it.targetSec || 0) : it.repRange}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                <button
+                  onClick={() => {
+                    setState(p => ({
+                      ...p,
+                      session: { id: uid(), name: t.name, startedAt: Date.now(), entries: entriesFromItems(t.items, p.settings, p.exercises) }
+                    }));
+                    setTab('log');
+                  }}
+                  className="bg-amber text-ink font-semibold rounded-xl py-3">Start</button>
+                <button
+                  onClick={() => { if (sure(`Delete ${t.name}?`)) setState(p => ({ ...p, templates: p.templates.filter(x => x.id !== t.id) })); }}
+                  className="text-bad border border-bad/30 rounded-xl py-3 text-[14px]">Delete</button>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
+        {state.templates.length === 0 && <p className="text-muted text-sm">No routines saved yet.</p>}
       </div>
 
       <Btn className="w-full mt-4" onClick={saveCurrentAsTemplate}>Save current session as a routine</Btn>
@@ -1844,7 +2101,7 @@ function ExercisesView({ state, setState, say }) {
 /* ────────────────────────────────────────────────────────────────
    History
    ──────────────────────────────────────────────────────────────── */
-function SessionCard({ w }) {
+function SessionCard({ w, onEdit }) {
   return (
     <div className="bg-panel border border-line rounded-2xl p-4">
       <div className="flex justify-between items-baseline gap-3">
@@ -1853,32 +2110,93 @@ function SessionCard({ w }) {
       </div>
       <div className="num text-[12px] text-muted mt-1">
         {(w.totalVolumeKg || 0).toLocaleString()} kg
-        {w.totalTimeSec > 0 && <> · {dur(w.totalTimeSec)}</>}
-        {' '}· {w.exercises.length} exercises · {w.durationMin} min
+        {w.totalTimeSec > 0 && <> · {dur(w.totalTimeSec)} held</>}
+        {w.durationMin != null && <> · {w.durationMin} min</>}
       </div>
+      <ul className="mt-3 space-y-1 border-t border-line pt-3">
+        {(w.exercises || []).map((e, i) => (
+          <li key={i} className="text-[13px] flex justify-between gap-3">
+            <span className="truncate">{e.name}{e.unilateral ? ' (per side)' : ''}</span>
+            <span className="num text-muted whitespace-nowrap">
+              {e.type === 'time' ? dur(e.timeSec || 0) : `${(e.volumeKg || 0).toLocaleString()} kg`}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {onEdit && (
+        <Btn className="w-full mt-3" onClick={onEdit}>Edit date &amp; duration</Btn>
+      )}
     </div>
   );
 }
 
-function HistoryView({ state, say }) {
-  const [openId, setOpenId] = useState(null);
+/* ── Fix up a logged workout: the date, and the duration you lose
+      whenever you forget to hit Finish until the next morning. ─────── */
+function EditSessionSheet({ open, onClose, record, onSave }) {
+  const [date, setDate] = useState('');
+  const [mins, setMins] = useState('');
+  const [name, setName] = useState('');
 
-  const week = useMemo(() => {
-    const cutoff = Date.now() - 7 * 864e5;
-    const ws = state.history.filter(w => (w.finishedAt || 0) > cutoff);
-    return { volume: ws.reduce((a, w) => a + (w.totalVolumeKg || 0), 0), count: ws.length };
-  }, [state.history]);
+  useEffect(() => {
+    if (record) {
+      setDate(record.date || '');
+      setMins(record.durationMin == null ? '' : String(record.durationMin));
+      setName(record.workout || '');
+    }
+  }, [record]);
 
-  const exportAll = () => {
-    copyText(JSON.stringify({ app: 'IronDesk', version: 2, exportedAt: new Date().toISOString(), workouts: state.history }, null, 2))
-      .then(() => say('Full history copied. Paste it to Claude for your weekly sync.'));
+  if (!record) return null;
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(date);
+
+  return (
+    <Sheet open={open} onClose={onClose} title="Edit workout">
+      <Field label="Name" value={name} onChange={e => setName(e.target.value)} />
+      <div className="mt-3">
+        <Field label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} />
+        {!valid && <p className="text-[11px] text-bad mt-1">Needs to be a real date.</p>}
+      </div>
+      <div className="mt-3">
+        <Field label="Duration (minutes)" inputMode="numeric" value={mins}
+          onChange={e => setMins(e.target.value)} />
+        <p className="text-[11px] text-muted mt-1 leading-relaxed">
+          Forgot to hit Finish? The recorded duration ran until you did. Put the real
+          figure in here and the sheet is corrected too — the session’s rows are replaced,
+          not duplicated.
+        </p>
+      </div>
+      <Btn tone="primary" className="w-full mt-4" disabled={!valid}
+        onClick={() => onSave({ ...record, date, workout: name.trim() || record.workout, durationMin: mins === '' ? null : Math.max(0, num(mins)) })}>
+        Save changes
+      </Btn>
+    </Sheet>
+  );
+}
+
+function HistoryView({ state, setState, say }) {
+  const [editing, setEditing] = useState(null);
+
+  const save = async updated => {
+    setState(p => ({ ...p, history: p.history.map(h => h.id === updated.id ? updated : h) }));
+    setEditing(null);
+    const url = state.settings.webhookUrl.trim();
+    if (!url) { say('Workout updated'); return; }
+    try {
+      await postWebhook(url, {
+        action: 'replaceSession', sessionId: updated.id, rows: rowsForRecord(updated)
+      });
+      say('Workout updated, sheet corrected');
+    } catch (e) {
+      say('Workout updated here, but the sheet could not be reached');
+    }
   };
+
+  const totalVolume = state.history.reduce((a, w) => a + (w.totalVolumeKg || 0), 0);
 
   if (state.history.length === 0) {
     return (
       <div>
         <h1 className="text-2xl font-bold mb-1">History</h1>
-        <p className="text-muted text-sm">Finish a workout and it lands here.</p>
+        <p className="text-muted text-sm">Nothing logged yet. Finish a session and it lands here.</p>
       </div>
     );
   }
@@ -1887,50 +2205,18 @@ function HistoryView({ state, say }) {
     <div>
       <h1 className="text-2xl font-bold mb-1">History</h1>
       <p className="text-muted text-sm mb-5 num">
-        Last 7 days: {Math.round(week.volume).toLocaleString()} kg across {week.count} sessions
+        {state.history.length} sessions · {Math.round(totalVolume).toLocaleString()} kg lifted
       </p>
-
       <div className="space-y-3">
         {state.history.map(w => (
-          <div key={w.id}>
-            <button onClick={() => setOpenId(openId === w.id ? null : w.id)} className="w-full text-left">
-              <SessionCard w={w} />
-            </button>
-            {openId === w.id && (
-              <div className="bg-raise border border-line border-t-0 rounded-b-2xl -mt-1 p-4 space-y-2">
-                {w.exercises.map((e, i) => (
-                  <div key={i} className="text-[13px]">
-                    <div className="flex justify-between gap-3">
-                      <span className="truncate">{e.name}</span>
-                      <span className="num text-muted whitespace-nowrap">
-                        {(e.type || 'reps') === 'time' ? dur(e.timeSec || 0) : `${(e.volumeKg || 0).toLocaleString()} kg`}
-                      </span>
-                    </div>
-                    <div className="num text-[11px] text-muted mt-0.5">
-                      {e.sets.map(st => (e.type === 'time'
-                        ? `${st.weightKg ? st.weightKg + 'kg ' : ''}${st.durationSec}s`
-                        : `${st.weightKg}×${st.reps}`)).join('  ·  ')}
-                    </div>
-                  </div>
-                ))}
-                <button onClick={() => copyText(JSON.stringify(w, null, 2)).then(() => say('Session JSON copied'))}
-                  className="w-full mt-2 text-[13px] text-amber border border-amber/40 rounded-lg py-2.5">
-                  Copy this session as JSON
-                </button>
-              </div>
-            )}
-          </div>
+          <SessionCard key={w.id} w={w} onEdit={() => setEditing(w)} />
         ))}
       </div>
-
-      <Btn className="w-full mt-5" onClick={exportAll}>Copy full history JSON</Btn>
+      <EditSessionSheet open={!!editing} onClose={() => setEditing(null)} record={editing} onSave={save} />
     </div>
   );
 }
 
-/* ────────────────────────────────────────────────────────────────
-   Settings
-   ──────────────────────────────────────────────────────────────── */
 function SettingsView({ state, setState, say }) {
   const s = state.settings;
   const set = (k, v) => setState(p => ({ ...p, settings: { ...p.settings, [k]: v } }));
@@ -1995,6 +2281,74 @@ function SettingsView({ state, setState, say }) {
       say(`${added} added, ${updated} updated from your sheet`);
     } catch (e) {
       say("Couldn't read the Library tab. Redeploy the script as a new version.");
+    }
+    setBusy('');
+  };
+
+  const backupRoutines = async () => {
+    const url = s.webhookUrl.trim();
+    if (!url) { say('Paste your Apps Script URL first.'); return; }
+    setBusy('tplup');
+    try {
+      await syncRoutinesToSheet(state);
+      say(`Backed up ${state.templates.length} routines`);
+    } catch (e) { say("Couldn't reach the script."); }
+    setBusy('');
+  };
+
+  const importRoutines = async () => {
+    const url = s.webhookUrl.trim();
+    if (!url) { say('Paste your Apps Script URL first.'); return; }
+    if (!sure('Merge the Routines tab into this device? Routines with the same id are overwritten.')) return;
+    setBusy('tpldown');
+    try {
+      const data = await fetchTab(url, 'routines');
+      const rows = (data && data.routines) || [];
+      if (!rows.length) { say('The Routines tab came back empty.'); setBusy(''); return; }
+      let added = 0, updated = 0;
+      setState(p => {
+        let list = p.templates.slice();
+        rows.forEach(r => {
+          let items;
+          try { items = JSON.parse(r.items_json); } catch (e) { return; }
+          if (!Array.isArray(items)) return;
+          const at = list.findIndex(t => t.id === r.id);
+          const tpl = { id: r.id || uid(), name: r.name || 'Routine', items };
+          if (at >= 0) { list[at] = tpl; updated++; } else { list.push(tpl); added++; }
+        });
+        return { ...p, templates: list };
+      });
+      say(`${added} added, ${updated} updated from your sheet`);
+    } catch (e) {
+      say("Couldn't read the Routines tab. Redeploy the script as a new version.");
+    }
+    setBusy('');
+  };
+
+  const importWorkouts = async () => {
+    const url = s.webhookUrl.trim();
+    if (!url) { say('Paste your Apps Script URL first.'); return; }
+    if (!sure('Rebuild history from the Workouts tab? Sessions already on this device are kept.')) return;
+    setBusy('hist');
+    try {
+      const data = await fetchTab(url, 'workouts');
+      const rows = (data && data.rows) || [];
+      if (!rows.length) { say('The Workouts tab came back empty.'); setBusy(''); return; }
+      const records = recordsFromRows(rows);
+      let added = 0;
+      setState(p => {
+        const have = new Set(p.history.map(h => h.id));
+        // Local records win: they hold detail the flat sheet can't carry.
+        const fresh = records.filter(r => !have.has(r.id));
+        added = fresh.length;
+        const merged = [...p.history, ...fresh]
+          .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+          .slice(0, 400);
+        return { ...p, history: merged };
+      });
+      setTimeout(() => say(`${added} sessions restored from your sheet`), 0);
+    } catch (e) {
+      say("Couldn't read the Workouts tab. Redeploy the script as a new version.");
     }
     setBusy('');
   };
@@ -2070,6 +2424,23 @@ function SettingsView({ state, setState, say }) {
           {busy === 'import' ? 'Reading…' : 'Import Library from Sheet'}
         </Btn>
         <Btn className="w-full" onClick={restoreCatalogue}>Restore missing built-in movements</Btn>
+
+        <div className="h-2" />
+        <Btn className="w-full" onClick={backupRoutines} disabled={busy === 'tplup'}>
+          {busy === 'tplup' ? 'Sending…' : `Backup Routines to Sheet (${state.templates.length})`}
+        </Btn>
+        <Btn className="w-full" onClick={importRoutines} disabled={busy === 'tpldown'}>
+          {busy === 'tpldown' ? 'Reading…' : 'Import Routines from Sheet'}
+        </Btn>
+        <Btn className="w-full" onClick={importWorkouts} disabled={busy === 'hist'}>
+          {busy === 'hist' ? 'Reading…' : 'Restore Workouts from Sheet'}
+        </Btn>
+        <p className="text-[11px] text-muted leading-relaxed">
+          Workouts are already sent on every Finish, so the sheet is your backup — this
+          pulls them back onto a new device or after clearing storage. Sessions already
+          here are kept as they are. Tabs: {WORKOUT_COLUMNS.length}-column Workouts,
+          {ROUTINE_COLUMNS.length}-column Routines.
+        </p>
         <p className="text-[11px] text-muted leading-relaxed mb-2">
           The Library tab stores {LIBRARY_COLUMNS.join(', ')}. Importing merges by name —
           matching exercises take the sheet’s values, new ones are added, and nothing on this
@@ -2098,43 +2469,45 @@ function SettingsView({ state, setState, say }) {
 
 const APPS_SCRIPT = `const WORKOUT_SHEET = 'Workouts';
 const LIBRARY_SHEET = 'Library';
-const WORKOUT_HEADERS = ['date','workout','exercise','type','set','weight_kg','reps','duration_s','rpe','volume_kg'];
+const ROUTINE_SHEET = 'Routines';
+
+const WORKOUT_HEADERS = ['date','workout','exercise','type','set','weight_kg','reps',
+  'duration_s','rpe','volume_kg','per_side','session_min','session_id'];
 const LIBRARY_HEADERS = ['name','type','defaultRestSec','isFavorite','note','group'];
+const ROUTINE_HEADERS = ['id','name','items_json','updated'];
 
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
-    // Current payload: 2D rows in LIBRARY_HEADERS order.
-    if (body.action === 'syncLibrary') return reply(upsertLibrary(body.library || []));
-    // Older payload, kept so an app that hasn't updated yet still works.
-    if (body.action === 'library.upsert') return reply(upsertLibrary(objectsToRows(body.exercises || [])));
+    const a = body.action;
+    if (a === 'syncLibrary')    return reply(upsert(LIBRARY_SHEET, LIBRARY_HEADERS, body.library || [], 0));
+    if (a === 'syncRoutines')   return reply(upsert(ROUTINE_SHEET, ROUTINE_HEADERS, body.routines || [], 0));
+    if (a === 'replaceSession') return reply(replaceSession(body.sessionId, body.rows || []));
+    if (a === 'library.upsert') return reply(upsert(LIBRARY_SHEET, LIBRARY_HEADERS, objectsToRows(body.exercises || []), 0));
     return reply(appendWorkout(body.rows || []));
   } catch (err) {
     return reply({ ok: false, error: String(err) });
   }
 }
 
-function objectsToRows(list) {
-  return list.map(function (x) {
-    return [
-      x.name,
-      x.type || 'reps',
-      x.defaultRestSec == null ? '' : x.defaultRestSec,
-      x.isFavorite === true,
-      x.note || '',
-      x.group || 'Other'
-    ];
-  });
-}
-
 function doGet(e) {
   const p = (e && e.parameter) || {};
   try {
-    if (p.action === 'library') return reply(listLibrary(), p.callback);
+    if (p.action === 'library')  return reply(readTab(LIBRARY_SHEET, LIBRARY_HEADERS, 'exercises'), p.callback);
+    if (p.action === 'routines') return reply(readTab(ROUTINE_SHEET, ROUTINE_HEADERS, 'routines'), p.callback);
+    if (p.action === 'workouts') return reply(readTab(WORKOUT_SHEET, WORKOUT_HEADERS, 'rows'), p.callback);
     return reply({ ok: true, message: 'Iron Desk webhook is live' }, p.callback);
   } catch (err) {
     return reply({ ok: false, error: String(err) }, p.callback);
   }
+}
+
+function objectsToRows(list) {
+  return list.map(function (x) {
+    return [x.name, x.type || 'reps',
+      x.defaultRestSec == null ? '' : x.defaultRestSec,
+      x.isFavorite === true, x.note || '', x.group || 'Other'];
+  });
 }
 
 function sheetFor(name, headers) {
@@ -2152,34 +2525,67 @@ function sheetFor(name, headers) {
 function appendWorkout(rows) {
   if (!rows.length) return { ok: false, error: 'No rows in request' };
   const sh = sheetFor(WORKOUT_SHEET, WORKOUT_HEADERS);
-  sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-  return { ok: true, appended: rows.length };
+  const width = WORKOUT_HEADERS.length;
+  const padded = rows.map(function (r) { return pad(r, width); });
+  sh.getRange(sh.getLastRow() + 1, 1, padded.length, width).setValues(padded);
+  return { ok: true, appended: padded.length };
 }
 
-function upsertLibrary(rows) {
-  if (!rows.length) return { ok: false, error: 'No library rows in request' };
-  const sh = sheetFor(LIBRARY_SHEET, LIBRARY_HEADERS);
-  const width = LIBRARY_HEADERS.length;
+/* Delete every row carrying this session id, then append the new ones.
+   That makes a re-send a correction rather than a duplicate, which is
+   what lets you fix a date or a duration after the fact. */
+function replaceSession(sessionId, rows) {
+  if (!sessionId) return appendWorkout(rows);
+  const sh = sheetFor(WORKOUT_SHEET, WORKOUT_HEADERS);
+  const width = WORKOUT_HEADERS.length;
+  const idCol = WORKOUT_HEADERS.indexOf('session_id') + 1;
+  const last = sh.getLastRow();
+  let removed = 0;
+
+  if (last > 1) {
+    const ids = sh.getRange(2, idCol, last - 1, 1).getValues();
+    // Delete bottom-up so earlier row numbers stay valid.
+    for (var i = ids.length - 1; i >= 0; i--) {
+      if (String(ids[i][0]) === String(sessionId)) { sh.deleteRow(i + 2); removed++; }
+    }
+  }
+
+  if (rows.length) {
+    const padded = rows.map(function (r) { return pad(r, width); });
+    sh.getRange(sh.getLastRow() + 1, 1, padded.length, width).setValues(padded);
+  }
+  return { ok: true, removed: removed, appended: rows.length };
+}
+
+function pad(r, width) {
+  const out = [];
+  for (var c = 0; c < width; c++) out.push(r[c] === undefined || r[c] === null ? '' : r[c]);
+  return out;
+}
+
+/* Generic upsert keyed on a column index — names for the library,
+   ids for routines. */
+function upsert(sheetName, headers, rows, keyIndex) {
+  if (!rows.length) return { ok: false, error: 'No rows in request' };
+  const sh = sheetFor(sheetName, headers);
+  const width = headers.length;
   const last = sh.getLastRow();
 
-  // Map existing names (trimmed, lowercased) to their row number.
   const index = {};
   if (last > 1) {
-    const names = sh.getRange(2, 1, last - 1, 1).getValues();
-    for (var i = 0; i < names.length; i++) {
-      const key = String(names[i][0]).trim().toLowerCase();
-      if (key) index[key] = i + 2;
+    const keys = sh.getRange(2, keyIndex + 1, last - 1, 1).getValues();
+    for (var i = 0; i < keys.length; i++) {
+      const k = String(keys[i][0]).trim().toLowerCase();
+      if (k) index[k] = i + 2;
     }
   }
 
   const fresh = [];
   let updated = 0;
   rows.forEach(function (r) {
-    if (!r || !String(r[0] || '').trim()) return;
-    // Pad or trim so a short row can never shift the columns.
-    const row = [];
-    for (var c = 0; c < width; c++) row.push(r[c] === undefined ? '' : r[c]);
-    const at = index[String(r[0]).trim().toLowerCase()];
+    if (!r || !String(r[keyIndex] || '').trim()) return;
+    const row = pad(r, width);
+    const at = index[String(r[keyIndex]).trim().toLowerCase()];
     if (at) { sh.getRange(at, 1, 1, width).setValues([row]); updated++; }
     else fresh.push(row);
   });
@@ -2188,21 +2594,27 @@ function upsertLibrary(rows) {
   return { ok: true, added: fresh.length, updated: updated };
 }
 
-function listLibrary() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LIBRARY_SHEET);
-  if (!sh || sh.getLastRow() < 2) return { ok: true, exercises: [] };
-  const values = sh.getRange(2, 1, sh.getLastRow() - 1, LIBRARY_HEADERS.length).getValues();
-  const out = values.filter(function (r) { return String(r[0]).trim() !== ''; }).map(function (r) {
-    return {
-      name: String(r[0]).trim(),
-      type: String(r[1]).trim() === 'time' ? 'time' : 'reps',
-      defaultRestSec: r[2] === '' || r[2] == null ? null : Number(r[2]),
-      isFavorite: r[3] === true || String(r[3]).toLowerCase() === 'true',
-      note: String(r[4] == null ? '' : r[4]),
-      group: String(r[5] == null ? '' : r[5]) || 'Other'
-    };
+/* Read a tab back as objects keyed by its headers. */
+function readTab(sheetName, headers, key) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const out = {};
+  out.ok = true;
+  out[key] = [];
+  if (!sh || sh.getLastRow() < 2) return out;
+
+  const values = sh.getRange(2, 1, sh.getLastRow() - 1, headers.length).getValues();
+  out[key] = values.filter(function (r) {
+    return String(r[0]).trim() !== '';
+  }).map(function (r) {
+    const o = {};
+    for (var c = 0; c < headers.length; c++) {
+      o[headers[c]] = r[c] instanceof Date
+        ? Utilities.formatDate(r[c], Session.getScriptTimeZone(), 'yyyy-MM-dd')
+        : r[c];
+    }
+    return o;
   });
-  return { ok: true, exercises: out };
+  return out;
 }
 
 // A callback turns this into JSONP, which is how the app reads the sheet
